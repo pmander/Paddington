@@ -1,0 +1,1415 @@
+#!/bin/bash
+#  Usage: Install erl-root-dir [release-vsn [rel-file]]
+
+# trap undeclared variables
+# fail when a command exits with an error code
+# (options not enabled until their impact is assessed)
+# set -o nounset -o errexit -o errtrace -o pipefail
+
+# TODO: ticket:429 change the SMF and port-install tarballs into nested Package files,
+# TODO: Similar to the one that contains this script.
+
+ERTS_VSN="~ERTS_VSN~"
+RELEASE_VSN="~RELEASE_VSN~"
+NAME="${NAME:-~NAME~}"
+SYS_ARCH='~SYS_ARCH~'
+
+# TODO: ticket:431 The UID and GID should change to match the name of the service.
+service_acct="${SVC_ACCT:-~NAME~}"
+service_grp="${SVC_GRP:-~NAME~}"
+
+#
+# Strip illegal characters from account and group identifiers.
+#
+service_acct="${service_acct//[^0-9A-Za-z]/}"
+service_grp="${service_grp//[^0-9A-Za-z]/}"
+
+#
+# Additional accounts listed here. The mandatory
+# ${service_acct} is prepended later in the script.
+#
+required_accounts="optional=epmd:erlang optional=metrica:erlang"
+
+## Coloured output
+#
+# 16 colour XTerm and VT100 escape codes, ESC[ followed by
+#  0    Cancel all attributes except foreground/background color
+#  1    Bright (bold)
+#  2    Normal (not bold)
+#  3
+#  4    Underline
+#  5    Blink
+#  6
+#  7    Reverse video
+#  8    Concealed (don't display characters)
+#  9-29
+# 30    Make foreground (the characters) black
+# 31    Make foreground red
+# 32    Make foreground green
+# 33    Make foreground yellow
+# 34    Make foreground blue
+# 35    Make foreground magenta
+# 36    Make foreground cyan
+# 37    Make foreground white
+# 38    256 colour mode foreground
+# 39
+# 40    Make background (around the characters) black
+# 41    Make background red
+# 42    Make background green
+# 43    Make background yellow
+# 44    Make background blue
+# 45    Make background magenta
+# 46    Make background cyan
+# 47    Make background white (you may need 0 instead, or in addition)
+# 48    256 colour mode background
+# 49-255
+#
+# 256 colour Xterm escape codes
+# set foreground=$'\E[38;5;${fg_colour}m'
+# set background=$'\E[48;5;${bg_colour}m'
+
+BOLD=$'\E[01m'
+RESET=$'\E[39;49;00m'
+COL_RED=$'\E[31;01m'
+COL_GRN=$'\E[32;01m'
+COL_YEL=$'\E[33;40;01m'
+COL_BLU=$'\E[34;01m'
+COL_MAG=$'\E[35;01m'
+COL_CYN=$'\E[36;01m'
+
+HELP_PREFIX="${COL_BLU}Help:${RESET} "
+INFO_PREFIX="${COL_GRN}Info:${RESET} "
+WARN_PREFIX="${COL_YEL}Warn:${RESET} "
+ERROR_PREFIX="${COL_RED}Error:${RESET} "
+
+Date_Now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+
+Backup_Suffix="${NAME}-${Date_Now}-BACKUP"
+
+system_class=$(echo "$(uname -s)-$(echo $(uname -r) | sed -n 's/\([0-9]*\.[0-9]*\).*/\1/p')-$(uname -p)")
+
+self_id='$Id: Install-script.src 23614 2013-05-31 15:29:53Z pmander $'
+
+self="$(basename ${0})"
+
+top_dir=$(pwd)
+
+HOSTNAME="$(hostname)"
+DOMAINNAME="$(domainname)"
+
+network_if_names=$( /sbin/ifconfig -a  | sed -n -e 's|^\([-_0-9A-Za-z]\{1,\}\).*|\1|p' )
+
+log_dir="$(pwd)/logs"
+'mkdir' -p "${log_dir}"
+log_filename="${self}-${Date_Now}.log"
+log_output="${log_dir}/${log_filename}"
+log_latest="${self}-latest.log"
+
+cat > "${log_output}" << EOF
+_____________________________________________________________________________
+
+       log file: ${log_filename}
+ generated with: ${self_id}
+        command: ${0} ${@}
+           host: ${HOSTNAME}
+
+       ERTS_VSN=${ERTS_VSN}
+    RELEASE_VSN=${RELEASE_VSN}
+           NAME=${NAME}
+_____________________________________________________________________________
+
+EOF
+
+( 'cd' "${log_dir}" \
+&& 'rm' -f "${log_latest}" \
+&& 'ln' -s "${log_filename}" "${log_latest}"
+)
+
+function log_msg # [prefix [message]]
+{
+  echo -n -e "${2:+${1}}${2//
+/
+${1}}${2:+\n}" | tee -a ${log_output}
+}
+
+function inform # message
+{
+  log_msg "${INFO_PREFIX}" "${1//$ERL_ROOT/$NAME}"
+}
+
+function warn # message
+{
+  log_msg "${WARN_PREFIX}" "${1}"
+}
+
+declare continue_on_error='false'
+function error # [ message [ exit_code ] ]
+{
+  # Abort the script with an optional message and error code
+  # Only append the prefix and feed a line if there's a message specified.
+  # Exit error code defaults to 1 if not specified.
+  case "${continue_on_error}" in
+  'true' )
+    log_msg "${ERROR_PREFIX}" "${1}
+Continuing regardless..."
+    return ${2:-1}
+    ;;
+  * )
+    log_msg "${ERROR_PREFIX}" "${1}"
+    exit ${2:-1}
+    ;;
+  esac
+}
+
+description="This script, ${BOLD}${self}${RESET}, installs the ${RELEASE_VSN} service."
+function usage
+{
+  log_msg "${HELP_PREFIX}" "
+${BOLD}Usage:${RESET}
+
+  ${self} [ options ]
+
+Where available options are:
+
+  ${BOLD}--help${RESET}
+    Show this message and exit.
+    Optional.
+
+  ${BOLD}--no-root${RESET}
+    Proceed with installation, skipping steps requiring administrator
+    access rights. E.g. user accounts, if missing, will not be created.
+    ${BOLD}NOTE: --no-root also implied --no-smf,${RESET} which requires administrator
+    access rights.
+    Optional.
+
+  ${BOLD}--no-smf${RESET}
+    Skip installing Solaris Service Management Facility (SMF) files.
+    ${BOLD}NOTE: not installing SMF will prevent the service automatically${RESET}
+    ${BOLD}restarting when power is restored${RESET} after accidental power failure, or
+    planned system shutdown.
+    Optional.
+
+  ${BOLD}--continue${RESET}
+    Continue the installation process despite errors. May be
+    useful when root access is denied during installation.
+
+  ${BOLD}--snmp=<network-interface>${RESET}
+    Set the network interface name which carries SNMP traffic.
+    Mandatory, unless the SNMP_INTERFACE environment variable is set. This
+    can be done by setting the environment variable SNMP_INTERFACE on the
+    command line:
+
+      SNMP_INTERFACE=<network-interface> ${self} [options]
+
+    Where <network-interface> is one of the following values:
+      * ${network_if_names//
+/
+      * }
+
+  ${BOLD}--sname=<erlang-short-name>${RESET}
+    Set the erlang short node name to <erlang-short-name>@${HOSTNAME}
+    Optional, but if not specified the node name will be:
+
+      '${NAME}@${HOSTNAME}'
+
+All output of every execution of ${self} is stored in the logs
+directory.
+This output text is stored as:
+  ${log_output}.
+The latest log is symlinked as:
+  ${log_latest}
+(End of usage text)"
+  exit 0
+}
+
+inform "${description}"
+
+#
+# Check the target system architecture matches the compiled architecture
+#
+
+function detect_architecture
+{
+  declare -r os_vsn=$(echo "$(uname -s)-$(echo $(uname -r) | sed -n 's/\([0-9]*\.[0-9]*\).*/\1/p')")
+  local system_class opt_arch
+
+  case $(uname -s) in
+  ( Darwin )
+    system_class="${os_vsn}-$(uname -p)"
+    ;;
+  ( SunOS )
+    opt_arch=$(optisa $(isalist))
+    system_class="${os_vsn}-${opt_arch}"
+    ;;
+  ( Linux )
+    case $(uname -p) in
+    ( unknown )
+      system_class="${os_vsn}-$(uname -m)"
+      ;; 
+    ( * )
+      system_class="${os_vsn}-$(uname -p)"
+      ;;
+    esac
+    ;;
+  esac
+  echo -n "${system_class}"
+}
+
+target_arch=$( detect_architecture )
+if [ "'${SYS_ARCH}'" != "'${target_arch}'" ] ;
+then
+  error "Package is for a '${SYS_ARCH}' system, not a '${target_arch}' system."
+fi
+
+#
+# Parse command line options and parameters.
+#
+opt_no_root='false'
+opt_no_smf='false'
+opt_no_ssl='false'
+opt_with_epmd='true'
+while [[ "$#" != '0' ]]
+do
+  case "${1}" in
+  ( '--help' )
+    usage
+    ;;
+  ( '--no-root' )
+    opt_no_root='true'
+    ;;
+  ( '--no-smf' )
+    opt_no_smf='true'
+    ;;
+  ( '--no-epmd' )
+    unset opt_with_epmd ;
+    ;;
+  ( --cookie=* )
+    COOKIE="${1#*=}"
+    ;;
+  ( '--cookie' )
+    shift
+    COOKIE="${1}"
+    ;;
+  ( --snmp=* )
+    SNMP_INTERFACE="${1#*=}"
+    ;;
+  ( '--snmp' )
+    shift
+    SNMP_INTERFACE="${1}"
+    ;;
+  ( --sname=* )
+    NODE_NAME="${1#*=}"
+    ;;
+  ( '--sname' )
+    shift
+    NODE_NAME="${1}"
+    ;;
+  ( '--continue' )
+    continue_on_error='true'
+    ;;
+
+  ( --user=* )
+    service_acct="${1#*=}"
+    ;;
+  ( '--user' )
+    shift
+    service_acct="${1}"
+    ;;
+
+  ( --group=* )
+    service_grp="${1#*=}"
+    ;;
+  ( '--group' )
+    shift
+    service_grp="${1}"
+    ;;
+
+  ( --ssl=* )
+    OPENSSL="${1#*=}"
+    ;;
+  ( '--ssl' )
+    shift
+    OPENSSL="${1}"
+    ;;
+
+  ( '--no-ssl' )
+    opt_no_ssl='true'
+    ;;
+
+  ( --ssl-port=* )
+    SSL_PORT="${1#*=}"
+    ;;
+  ( '--ssl-port' )
+    shift
+    SSL_PORT="${1}"
+    ;;
+
+  ( --inets-port=* )
+    INETS_PORT="${1#*=}"
+    ;;
+  ( '--inets-port' )
+    shift
+    INETS_PORT="${1}"
+    ;;
+
+  ( --http-port=* )
+    HTTP_PORT="${1#*=}"
+    ;;
+  ( '--http-port' )
+    shift
+    HTTP_PORT="${1}" 
+    ;;
+
+  ( --diameter-port=* )
+    DIAMETER_LISTEN_PORT="${1#*=}"
+    ;;
+  ( '--diameter-port' )
+    shift
+    DIAMETER_LISTEN_PORT="${1}"
+    ;;
+
+  ( * )
+    error "Unrecognised parameter: ${1}"
+    ;;
+  esac
+  shift
+done
+
+#
+# The mandatory ${service_acct} prepended here, after
+# command line options are processed.
+#
+required_accounts="mandatory=${service_acct}:${service_grp} ${required_accounts}"
+
+#
+# OMC http port numbers
+#
+ssl_port="${SSL_PORT:-8081}"
+inets_port="${INETS_PORT:-8080}"
+http_port="${HTTP_PORT:-8082}"
+diameter_listen_port="${DIAMETER_LISTEN_PORT:-3868}"
+
+# Check if the value of COOKIE is set
+case "${COOKIE:-undefined}" in
+( undefined )
+  COOKIE="${NAME}_cookie"
+  warn "Created COOKIE=${COOKIE}
+If this is wrong, please either define the environment variable COOKIE
+
+  COOKIE=<erlang-cookie> ${self} [ options ]
+
+or supply the name as a command option
+
+  ${self} --cookie=<erlang-cookie> [ options ]
+"
+  ;;
+( * )
+  inform "Using specified COOKIE=${COOKIE}"
+  ;;
+esac
+
+# Check if the value of SNMP_INTERFACE is set
+case "${SNMP_INTERFACE:-undefined}" in
+( undefined )
+  error "
+The SNMP network interface is undefined.
+Please set SNMP_INTERFACE to the network interface which will carry SNMP
+traffic. This can either be done by setting the environment variable
+SNMP_INTERFACE on the command line:
+
+  SNMP_INTERFACE=<network-interface> ${self} [options]
+
+Or as an option:
+
+  ${self} --snmp=<network-interface> [options]
+
+Where <network-interface> is one of the following values:
+ * ${network_if_names//
+/
+ * }
+
+Use option --help for more usage information.
+"
+  ;;
+( * )
+  inform "SNMP_INTERFACE=${SNMP_INTERFACE}"
+  ;;
+esac
+
+# Check for erlang node short name
+if [[ "${NODE_NAME}" = "" ]]
+then
+  NODE_NAME="${NAME}@${HOSTNAME}"
+  warn "Using ${NODE_NAME} as default Erlang short node name.
+If this is wrong, please either define the environment variable NODE_NAME
+
+  NODE_NAME=<erlang-short-name> ${self} [ options ]
+
+or supply the name as a command option
+
+  ${self} --sname=<erlang-short-name> [ options ]
+"
+else
+  inform "using node name ${NODE_NAME}" >&2
+fi
+
+## Check for root permissions
+function check_root_permissions
+{
+  local _id_out
+  
+
+case "${opt_no_root}" in
+( true )
+  warn "Option --no-root given. Not checking for root permissions."
+  ;;
+( * )
+  _id_out=$(id)
+  case "${_id_out}" in     
+  ( uid=0\(root\)\ gid=0\(root\)* )    
+    inform "Running as root. Good."
+    ;;
+  ( uid=0\(root\)* )    
+    warn "Running as root, but under a non-root group. Continuing."
+    ;;
+  ( * )
+    error "Unable to parse id output.
+This may be solved by adding the --no-root option,
+if you wish to skip creating user accounts."
+    ;;
+  esac
+  ;;
+esac
+}
+
+check_root_permissions
+
+#
+# Check that an existing service is not running already
+#
+
+
+
+function seek_all_beam () 
+{ 
+    declare -r _service_name="${1}";
+    local _path _args;
+    local _list;
+    while read _path _args; do
+        case "${_path}" in 
+            */beam | */beam.smp)
+                _list="${_list}${_list:+
+}${_path}"
+            ;;
+            *)
+
+            ;;
+        esac;
+    done < <( ps -A -o args );
+    echo -n "${_list}"
+}
+
+function seek_all_epmd () 
+{ 
+    local _path _args;
+    local _list;
+    while read _path _args; do
+        case "${_path}" in 
+            */epmd)
+                _list="${_list}${_list:+
+}${_path}"
+            ;;
+            *)
+
+            ;;
+        esac;
+    done < <( ps -A -o args );
+    echo -n "${_list}"
+}
+
+function seek_service_path () # _service_name _path_list...
+{ 
+    declare -r IFS=$'\n';
+    declare -r _service_name="${1}";
+    shift;
+
+    local _path;
+    local _list;
+
+    for _path ; do
+        if [[ "${_path%/$_service_name/*}" != "${_path}" ]]; then
+            _list="${_list}${_list:+
+}${_path}";
+        fi;
+    done;
+    echo -n "${_list}"
+}
+
+
+
+function suggest_stopping_service () # _service_name _location
+{
+    declare -r _service_name="${1}";
+    declare -r _location="${2}";
+
+    if [ -d "/tmp/${_service_name}/" ]; then
+        echo -n "
+If the existing service must be permanently stopped, it
+may be found at ${_location}
+and may be terminated by connecting to the service shell with:
+
+  ${_location}/bin/to_erl /tmp/${_service_name}/
+
+And terminating it by issuing the following command:
+
+  init:stop().
+";
+    else
+        echo -n "
+Sorry, there is a ${_service_name} process running, but I can't
+offer a suggestion on how to stop it as there is no
+directory /tmp/${_service_name}/ where to_erl can find a
+pipe to connect to. Please contact an expert.
+
+Please examine the existing service which may be found at
+${_location}
+";
+    fi
+}
+
+
+function smf_state
+{
+  local _name _value
+
+  while read _name _value
+  do
+    case "${_name}" in
+    'state' )
+      echo -n "${_value}"
+      return 0
+      ;;
+    * )
+      continue
+      ;;
+    esac
+  done < <(svcs -l "$@")
+}
+
+
+function conflicting_service_running # _service_name _path_list
+{
+    declare -r _service_name="${1}";
+    shift
+    declare -r _path_list="${@}";
+
+    declare -r _smf_state=$( smf_state "${_service_name}" )
+
+    local _location="${_path_list%%/$_service_name/*}/${_service_name}";
+    _location="${_location##*
+}"
+
+    local _hint=$( suggest_stopping_service "${_service_name}" "${_location}" )
+
+  case "${system_class}" in
+  SunOS-5.10-*)
+
+    case "${_smf_state}" in
+    'online' )
+      # SMF managed and 'online'
+      error "
+There is a ${_service_name} process already running.
+
+  ${_location}
+
+Please halt the existing ${_service_name} service before installing.
+If SMF is controlling the existing service, this will require:
+
+  /usr/sbin/svcadm disable ${_service_name}
+"
+      ;;
+    '' )
+      # Not SMF managed
+      error "
+There is a ${_service_name} process already running, but is not managed using SMF.
+
+ * ${_path_list//
+/
+ * }
+
+${_hint}"
+      ;;
+    * )
+      # SMF managed and not 'online', but still running!
+      error "
+The service ${_service_name} is not 'online',
+but there is a server process running at:
+
+ * ${_path_list//
+/
+ * }
+
+${hint}"
+      ;;
+    esac
+    ;;
+  * )
+    # Not Solaris 10
+    error "
+There is a ${_service_name} process already running.
+ * ${_path_list//
+/
+ * }
+${_hint}"
+    ;;
+  esac
+
+}
+
+function conflicting_epmd_running # _service_name _path_list
+{
+    declare -r _service_name="${1}";
+    shift
+    declare -r _path_list="${@}";
+
+    local _location="${_path_list%%/$_service_name/*}/${_service_name}";
+
+    error "
+There is a EPMD process launched from
+
+ * ${_path_list//
+/
+ * }
+
+This executable will be replaced during installation.
+There may be services running depending on EPMD which
+may be disrupted as a result. To stop the EPMD process:
+
+ * ${_path_list//
+/ -kill
+ * } -kill
+
+But please consult an expert beforehand.
+"
+}
+
+function unmanaged_epmd_running # _service_name _epmd_list
+{
+  declare -r _service_name="${1}"
+  shift
+  declare -r _epmd_list="${@}"
+
+  local _hint=$( suggest_stopping_service "${_service_name}" "${_epmd_list}" )
+
+  case "${system_class}" in
+  ( SunOS-5.10-* )
+    error "
+There is an EPMD process running which is not managed by
+SMF. It may be that there is an existing Erlang service
+running on this server, ${HOSTNAME}, which must be
+permanently stopped before proceeding. Unless this is done,
+installing an SMF managed EPMD and ${_service_name} may result in
+either the ${_service_name} service failing to start, or both EPMD
+and ${_service_name} failing.
+${_hint}"
+    ;;
+  ( * )
+    warn "
+There is an EPMD process running which belongs to an
+existing Erlang service running on this server, ${HOSTNAME}.
+${_hint}"
+    ;;
+  esac
+}
+
+
+function seek_running_services () # _service_name
+{
+    local _service_name="${1}"
+
+    local _beam_list=$( seek_all_beam )
+    local _epmd_list=$( seek_all_epmd )
+    local _service_beam=$( seek_service_path "${_service_name}" "${_beam_list}" )
+    local _service_epmd=$( seek_service_path "${_service_name}" "${_epmd_list}" )
+
+
+    if [[ "${_service_beam%/$_service_name/*}" != "${_service_beam}" ]]; then
+        conflicting_service_running "${_service_name}" "${_service_beam}"
+    else
+        inform "no conflicting beams originating from ${_service_name}"
+    fi
+
+
+    if [[ "${_service_epmd%/$_service_name/*}" != "${_service_epmd}" ]]; then
+        conflicting_epmd_running "${_service_name}" "${_service_epmd}"
+    else
+        inform "no conflicting epmd originating from ${_service_name}"
+    fi
+
+
+    if [[ "%${_epmd_list}%" != "%%" ]] \
+    && [[ "${_epmd_list}" != "/lib/svc/bin/epmd" ]]; then
+        unmanaged_epmd_running "${_service_name}" "${_epmd_list}"
+    fi
+
+
+    if [[ "%${_beam_list}%" != "%%" ]]; then
+        warn "
+No existing ${_service_name} process found, but
+there are other beam processes running.
+Continuing under the assumption that
+it is safe to install ${_service_name}.
+ * ${_beam_list//
+/
+ * }
+"
+    else
+        inform "No beam processes found, all clear to install."
+    fi
+
+}
+
+
+case "${opt_no_root}-${opt_no_smf}-${system_class}" in
+( false-false-SunOS-5.10-* )
+  inform "Using SMF to manage service restart. Searching for conflicting SMF services"
+  seek_running_services "${NAME}"
+  ;;
+( true-* | *-true-* )
+  warn "SMF installation suppressed. Not searching for conflicting SMF services"
+  ;;
+( * )
+  inform "SMF is not required. Ignoring conflicting SMF services."
+  ;;
+esac
+
+
+# Verify presence of tarballs.
+#
+# The ${TARBALL} contains the service programs, applications and support
+# files.
+#
+# The ${PATCHES} contain further files to be installed alongside the Erlang
+# files before the Install-script starts processing and moving files to
+# their ultimate destination. The "additional.patch.tar.gz" is created with
+# the make-package script option --patch which takes a comma separated list
+# of files and folders. These files may be applications that are only loaded
+# on demand, and not loaded at service startup like those applications in
+# the release file.
+#
+# The ${POST_TARBALL} installs files after the Install-script has processed
+# the ${TARBALL} and the ${PATCHES}. It is a cop-out method of enabling a
+# botched package to be forcefully rammed into place despite glaring
+# evidence that the package is not fit for purpose. Use this and be dammed.
+#
+
+TARBALL="${RELEASE_VSN}.tar.gz"
+
+if [ -f "${TARBALL}" ]
+then
+  inform "Using service-tarball ${TARBALL}"
+else
+  error "No service-tarball ${TARBALL} found."
+fi
+
+POST_TARBALL="${NAME}_post_install.tar"
+
+if [ -f "${POST_TARBALL}" ]
+then
+  inform "Using post-install patch ${POST_TARBALL}"
+else
+  inform "No post-install patch found."
+fi
+
+## Create, or verify the existance of, suitable accounts.
+for flag_user_group in ${required_accounts}
+do
+  user_group="${flag_user_group#*=}"
+  flag="${flag_user_group%=*}"
+  this_user="${user_group%:*}"
+  this_group="${user_group#*:}"
+  inform "Checking for required account ${this_user} belonging to ${this_group}"
+
+  ## Create service account and group
+  account_info=$( id ${this_user} 2>&1 )
+  if [ "$?" == "0" ]
+  then
+    inform "Account ${this_user} already exists. Using existing account."
+    ## check if existing account as the correct group
+    tmp="${account_info#*gid=*(}"
+    gid="${tmp/)*}"
+
+    case "${gid}" in
+    ( "${this_group}" )
+      inform "Account ${this_user} belongs to the correct group ${this_group}."
+      ;;
+    ( * )
+      error "Account ${this_user} belongs to the wrong group ${gid}, should be ${this_group}. Aborting."
+      ;;
+    esac
+  else
+    case "${opt_no_root}-${flag}" in
+    ( true-optional )
+      warn "Optional account ${this_user} does not exist. Option --no-root prevents it being created. Continuing..."
+      ;;
+    ( true-* )
+      error "Mandatory account ${this_user} does not exist. Option --no-root prevents it being created. Aborting."
+      ;;
+    ( * )
+      inform "Account ${this_user} does not exist. Creating account."
+      status=$( groupadd ${this_group} 2>&1 )
+      case "$?-${flag}" in
+      ( 9-* )
+        inform "Group ${this_group} already exists. Using existing group."
+        ;;
+      ( 0-* )
+        inform "Created group ${this_group}."
+        ;;
+      ( *-optional )
+        warn "Failed to groupadd ${this_group}, returns: ${status}. Optional account. Continuing..."
+        ;;
+      ( * )
+        error "Failed to groupadd ${this_group}, returns: ${status}. Mandatory account. Aborting."
+        ;;
+      esac
+      if [ -d '/export/home' ] ;
+      then
+        this_home_dir="/export/home/${this_user}"
+      else
+        this_home_dir="/home/${this_user}"
+      fi
+      if [ -d "${this_home_dir}" ] ;
+      then
+        warn "The home directory ${this_home_dir} already exists.
+Moving to ${this_home_dir}.${Date_Now}"
+        mv "${this_home_dir}" "${this_home_dir}.${Date_Now}"
+      fi
+      if [ -e '/usr/bin/bash' ] ;
+      then
+        this_shell="/usr/bin/bash"
+      else
+        this_shell="/bin/bash"
+      fi
+      status=$( useradd -c "Service account for ${this_user}" \
+                        -d ${this_home_dir} \
+                        -g ${this_group} \
+                        -m \
+                        -s ${this_shell} \
+                        ${this_user} 2>&1 )
+      case "$?-${flag}" in
+      ( 0-* )
+        inform "Created ${this_user} successfully."
+        ;;
+      ( *-optional )
+        warn "Failed to create optional account ${this_user}. Continuing..."
+        ;;
+      ( * )
+        error "Failed to create mandatory account ${this_user}. Aborting."
+        ;;
+      esac
+      ;;
+    esac
+  fi
+done
+
+
+#
+# Set supplementary group memberships for user
+#
+function set_groups # user group group ...
+{
+  local user="$1"
+  shift
+  local groups="$@"
+  usermod -G "${groups// /,}" "${user}"
+}
+
+#
+# Make user metrica a member of the service group.
+#
+set_groups metrica $(groups metrica) ${service_grp}
+
+## Determine where the user account has been created or found
+## seek a line in /etc/passwd
+## beginning with '<user-id>:' i.e. '^${service_acct}:'
+## and ending with ':<home-dir>:<ignored>' i.e. ':\([^:]*\):[^:]*$'
+service_home=$( sed -n "s|^${service_acct}:.*:\([^:]*\):[^:]*$|\1|p" < /etc/passwd )
+ERL_ROOT="${service_home}/${NAME}"
+
+#
+# When files are created they are given full permissions to user
+# ${service_acct}; read and write permissions only to group members,
+# metrica in this case; and no permissions to anyone else.
+#
+echo "umask u=rwx,g=rw,o=" >> "${service_home}/.profile"
+chown ${service_acct}:${service_grp} "${service_home}/.profile"
+
+## Check which version of alarms is available
+LIB_ALARMS="$(echo ${ERL_ROOT}/lib/alarms-*)"
+if [ -d "${LIB_ALARMS}" ]
+then
+  ALARMS_VSN="${LIB_ALARMS##*/lib/alarms-}"
+  inform "Using alarms version ${ALARMS_VSN}"
+else
+  warn "No version of alarms found."
+fi
+
+
+
+
+## Unpack and verify the Erlang release tarball.
+inform "Unpacking Erlang program files ERL_ROOT=${ERL_ROOT}"
+
+function append_tarball # _tar_file _thing
+{
+  local _tar_file="${1}"
+  local _thing="${2}"
+
+  touch "${_tar_file}" \
+  && tar -uf "${_tar_file}" "${_thing}" \
+  || error "Failed to archive ${_thing}"
+}
+
+
+function archive_existing_service # _service_home _service_name _date
+{
+  local _home="${1}"
+  local _name="${2}"
+  local _date="${3}"
+
+  local _svc_dir="${_home}/${_name}"
+  local _archive_dir="${_home}/Installation-Archives"
+  local _thing
+
+  if [ -e "${_svc_dir}" ]
+  then
+    inform "Archiving the existing ${_svc_dir}"
+    mkdir -p "${_archive_dir}/${_name}"
+    local _service_tar="${_archive_dir}/${_name}/${_name}-service.${_date}.tar"
+    local _config_tar="${_archive_dir}/${_name}/${_name}-config.${_date}.tar"
+    local _Mnesia_tar="${_archive_dir}/${_name}/${_name}-Mnesia.${_date}.tar"
+    (  cd "${_home}"
+       for _thing in ${_name}/.* ${_name}/*
+       do
+         [ -e "${_thing}" ] || continue
+         case "${_thing}" in
+         */. | */.. )
+           continue
+           ;;
+         */[Mm]nesia* )
+           append_tarball "${_Mnesia_tar}" "${_thing}"
+           ;;
+         */config )
+           append_tarball "${_config_tar}" "${_thing}"
+           ;;
+         * )
+           append_tarball "${_service_tar}" "${_thing}"
+           ;;
+         esac
+       done || error "append_tarball exited with an error"
+    )
+    for _thing in ${_archive_dir}{,/${_name},/${_name}/*}
+    do 
+      chown ${service_acct}:${service_grp} "${_thing}"
+    done
+  fi
+}
+
+archive_existing_service \
+  "${service_home}" \
+  "${NAME}" \
+  "${Date_Now}" \
+&& rm -rf "${service_home}/${NAME}" \
+|| error "Unable to remove existing ${NAME} service."
+
+mkdir -p "${ERL_ROOT}" 
+status=$( gzip -c -d ${TARBALL} | ( cd "${ERL_ROOT}" && tar -xf - 2>&1) )
+inform "Untarring ${TARBALL} result: \"${status}\""
+
+
+if [ ! -d "${ERL_ROOT}/erts-${ERTS_VSN}/bin" ]
+then
+  error "Bad location (${ERL_ROOT}/erts-${ERTS_VSN}/bin) or erts module not un-tared"
+fi
+
+### TODO: more directory checks here...
+
+## Create various empty directories
+for dir in "bin" "log" "config/cert" "sasl_logfiles" "stats" "mnesia_backups" "app_logs" "patches/old"
+do
+  mkdir -p "${ERL_ROOT}/${dir}" || error "Cannot mkdir ${ERL_ROOT}/${dir}"
+  inform "Created directory ${dir}"
+done
+
+function set_permissions
+{ local each ;
+  for each ;
+  do if [ -d "${each}" ] ;
+     then chmod u=rwx,g=,o= "${each}" ;
+          set_permissions "${each}"/* ;
+     elif [ -f "${each}" ] ;
+     then chmod g=,o= "${each}" ;
+     fi ;
+  done ;
+}
+
+set_permissions "${ERL_ROOT}"
+chmod g+rx "${ERL_ROOT}/stats"
+
+# Create the SSL certificate file and symlinks.
+# http://www.gluster.org/docs/index.php/GlusterFS_Encrypted_network#Creation_of_the_x509_certificates
+# http://www.openssl.org/docs/apps/req.html
+function create_ssl_certificate
+{
+  local _short_certfile="config/cert/certificate.pem"
+  local _certfile="${ERL_ROOT}/${_short_certfile}"
+  local _openssl="${OPENSSL}"
+
+  if [[ "${opt_no_ssl}" == "true" ]]
+  then
+    warn "Generated SSL certificates suppressed by option '--no-ssl'."
+    return 0
+  fi
+
+  case "${_openssl}%%${system_class}" in
+  ( %%SunOS-5.10-* )
+    _openssl="/usr/sfw/bin/openssl"
+    ;;
+  ( %%Linux-* )
+    _openssl="/usr/bin/openssl"
+    ;; 
+  ( %%* )
+    warn "No openssl executable specified of found.
+  The SSL Certificates will not be generated and
+  the ${BOLD}${COL_RED}web GUI will not be available over HTTPS${RESET}."
+    return 0
+    ;;
+  ( *%%* )
+    warn "If openssl='${_openssl}' is incorrect then
+  SSL Certificates may fail to be created, in which
+  case ${BOLD}${COL_RED}the web GUI will not operate over HTTPS${RESET} until
+  the certificates are properly installed."
+    ;;
+  esac
+  inform "Using '${_openssl}' to create SSL certificates."
+
+  if [[ -x "${_openssl}" ]]
+  then
+    ${_openssl} req \
+     -new \
+     -x509 \
+     -days 365 \
+     -nodes \
+     -out ${_certfile} \
+     -keyout ${_certfile} \
+     -batch \
+    >> ${log_output} 2>&1 \
+    && inform "Created certificate file ${_short_certfile}" \
+    || error "Failed to create certificate file ${_short_certfile}"
+
+    ( cd "${ERL_ROOT}/config/cert" \
+      && ln -s certificate.pem cacert.pem \
+      && ln -s certificate.pem hostcert.pem \
+      && ln -s certificate.pem hostkey.pem ) \
+    && inform "Added symlinks to ${_short_certfile}" \
+    || error "Failed to create symlinks to ${_short_certfile}"
+  else
+    warn "Cannot execute openssl: '${_openssl}'
+  The SSL Certificates will not be generated and
+  the ${BOLD}${COL_RED}web GUI will not be available over HTTPS${RESET}."
+    return 0
+  fi
+}
+
+create_ssl_certificate
+
+## Copy executable and boot files to ${ERL_ROOT}/bin
+## Suppress execution of original files, for belts+braces
+for file in heart run_erl to_erl start_sasl.boot start_clean.boot
+do
+  source="${ERL_ROOT}/erts-${ERTS_VSN}/bin/${file}"
+  target="${ERL_ROOT}/bin/${file}"
+  if cp -p "${source}" "${target}" && chmod ugo-x ${source}
+  then
+    inform "Copied file ${file}"
+  else
+    error "Cannot copy file ${file}"
+  fi
+done
+
+cp "${ERL_ROOT}/bin/start_sasl.boot" \
+   "${ERL_ROOT}/bin/start.boot" \
+&& inform "Copied file start.boot" \
+|| error "Cannot copy file start.boot"
+
+short_start_erl_data="releases/start_erl.data"
+start_erl_data="${ERL_ROOT}/${short_start_erl_data}"
+echo $ERTS_VSN $RELEASE_VSN > ${start_erl_data}
+inform "Created file ${short_start_erl_data}"
+
+inform "Copy *.src files from erts-${ERTS_VSN}/bin/"
+for source in ${ERL_ROOT}/erts-${ERTS_VSN}/bin/*.src
+do
+  tmp="${source##*/}"
+  short_target="bin/${tmp%.src}"
+  target="${ERL_ROOT}/${short_target}"
+  if [[ -x "${target}" ]]
+  then
+    chmod -x "${target}" \
+    && mv "${target}" "${target}.original" \
+    && inform "Backup: ${short_target}.original" \
+    || error "Eh?! Who's fiddling with ${short_target} behind my back?!"
+  fi
+  cp "${source}" "${ERL_ROOT}/bin/" \
+  && inform "Copied erts-${ERTS_VSN}/bin/${tmp} to ${short_target}"
+done
+
+option_heart='-heart'
+case "${opt_no_root}-${opt_no_smf}-${system_class}" in
+( false-false-SunOS-5.10-* )
+  inform "Using SMF to manage service restart. Removing -heart option from the start script."
+  option_heart=''
+  ;;
+( true-* | *-true-* )
+  warn "SMF installation suppressed. Using -heart option in start script."
+  ;;
+( * )
+  inform "SMF is not required. Using -heart option in start script."
+  ;;
+esac
+
+inform "Replace %fields% in ~/${NAME}/bin/*.src files."
+for source in ${ERL_ROOT}/bin/*.src
+do
+  target="${source%.src}"
+  sed -e "\
+s|%USER%|${service_acct}|g;\
+s|%OPTION_HEART%|${option_heart}|g;\
+s|%EMU%|beam|g;\
+s|%FINAL_ROOTDIR%|${ERL_ROOT}|g;\
+s|%NAME%|${NAME}|g;\
+s|%SHORT_NAME%|${NODE_NAME%@*}|g;\
+s|%NODE_NAME%|${NODE_NAME}|g;\
+s|%COOKIE%|${COOKIE}|g\
+" < "${source}" \
+  > "${target}" \
+  && rm "${source}" \
+  && chmod 755 "${target}" \
+  && inform "Created file ${target##*/}
+    from ${source##*/}" \
+  || error "Cannot create file ${target}
+    from ${source}"
+done
+
+
+# Replace the AGENT_IP 4-tuple with actual SNMP ip address
+ifconfig_output=$( /sbin/ifconfig ${SNMP_INTERFACE} )
+if [[ "$?" != "0" ]]
+then
+  case $? in
+  ( 0 )
+    error "failed to find network interface ${SNMP_INTERFACE}
+please set SNMP_INTERFACE to one of the following values:
+ * ${network_if_names//
+/
+ * }"
+    ;;
+  ( * )
+    error "ifconfig failed, returned $?"
+    ;;
+  esac
+fi
+ip_address=$(echo ${ifconfig_output} \
+| sed -n -e 's|.*inet[^0-9]*\([0-9]*\)\.\([0-9]*\)\.\([0-9]*\)\.\([0-9]*\).*|\1,\2,\3,\4|p' )
+
+inform "Using address ${ip_address}"
+for source in ${ERL_ROOT}/lib/alarms-[0-9].[0-9]/priv/snmp_conf/agent.conf.src
+do
+  target="$(dirname ${source})/$(basename ${source} .src)"
+  sed -e "s|%AGENT_IP%|${ip_address}|"  "${source}" > "${target}"  
+  inform "Replacing %AGENT_IP% with ${ip_address}
+    in ${target}"
+done
+
+# Rewrite/create Erlang cookie file.
+rm -f ${ERL_ROOT}/.erlang.cookie
+if echo ${COOKIE} > ${ERL_ROOT}/.erlang.cookie && chmod 400 ${ERL_ROOT}/.erlang.cookie
+then
+  inform "Rewrite Erlang Cookie"
+else
+  error "Cannot rewrite Erlang Cookie"
+fi
+
+sys_config_dir="${ERL_ROOT}/releases/${RELEASE_VSN}"
+sys_config_file="${sys_config_dir}/sys.config"
+sys_config_temp="${sys_config_file}.tmp"
+
+[ -d ${sys_config_dir} ] || error "sys_config_dir ${sys_config_dir} not accessible."
+
+if mv ${sys_config_file} ${sys_config_temp} \
+  && sed -e "
+s|%ROOT_DIR%|${ERL_ROOT}|g;
+s|^\(.*inet_dist_listen_min, \)[0-9]*\(.*\)$|\1${DIST_MIN:-22200}\2|g;
+s|^\(.*inet_dist_listen_max, \)[0-9]*\(.*\)$|\1${DIST_MAX:-22210}\2|g;
+s|%ALARMS_VSN%|${ALARMS_VSN}|g" \
+    ${sys_config_temp} \
+    > ${sys_config_file} \
+  && rm ${sys_config_temp}
+then
+  inform "Created file ${sys_config_file}"
+else
+  error "Cannot create file ${sys_config_file}"
+fi
+
+
+
+for dir in ${ERL_ROOT}/lib/http_mgr-*/priv/* ;
+do [ -d "${dir}" ] || continue ;
+   mkdir -p "${ERL_ROOT}/config/www" ;
+   if ! mv "${dir}" "${ERL_ROOT}/config/www/${dir##*/}" ;
+   then error "Cannot move ${dir} to ${ERL_ROOT}/config/www/" ;
+   fi ;
+done ;
+
+mkdir -p "${ERL_ROOT}/config"
+for dir in ${ERL_ROOT}/lib/*/priv ;
+do [ -d "${dir}" ] || continue ;
+   case ${dir} in
+   */http_mgr-*/priv ) ;;
+   */alarms-*/priv )
+     if ! mv "${dir}/snmp_conf" "${ERL_ROOT}/config/snmp_conf"
+     then error "Cannot move ${dir}/snmp_conf to ${ERL_ROOT}/config" ;
+     fi
+     ;;
+   * )
+     for file in ${dir}/{,*/,*/*/,*/*/*/}*.conf
+     do [ -f "${file}" ] || continue ;
+        if ! mv -f "${file}" "${ERL_ROOT}/config/${file##*/}" ;
+        then error "Cannot move ${file} to ${ERL_ROOT}/config/" ;
+        fi ;
+     done ;
+
+     if [ -d "${ERL_ROOT}/config/www" ] ;
+     then for file in ${dir}/{,*/,*/*/,*/*/*/}*.{html,css,esp}
+          do [ -f "${file}" ] || continue ;
+             case "${file}" in
+             *.html) tmp="${ERL_ROOT}/config/www/htdocs/" ;;
+             *.css)  tmp="${ERL_ROOT}/config/www/htdocs/css/" ;;
+             *.esp)  tmp="${ERL_ROOT}/config/www/esp/" ;;
+             esac
+             if ! mv -f "${file}" "${tmp}${file##*/}" ;
+             then error "Cannot move ${file} to ${tmp}" ;
+             fi ;
+          done ;
+     fi
+     ;;
+   esac
+done
+
+for file in ${ERL_ROOT}/config/{,*/,*/*/,*/*/*/}*.{conf,html,esp}
+do [ -e "${file}" ] || continue
+   mv ${file} ${file}.tmp
+   sed -e "\
+s|%INETS_PORT%|${inets_port}|g;\
+s|%SSL_PORT%|${ssl_port}|g;\
+s|%HTTP_PORT%|${http_port}|g;\
+s|%DIAMETER_LISTEN_PORT%|${diameter_listen_port}|g;\
+s|%USER%|${service_acct}|g;\
+s|%IP_ADDR%|${ip_address}|g;\
+s|%HOME_DIR%|${service_home}|g;\
+s|%FINAL_ROOTDIR%|${ERL_ROOT}|g;\
+s|%ROOT_DIR%|${ERL_ROOT}|g;\
+s|%NODE_NAME%|${NODE_NAME}|g;\
+s|%HOSTNAME%|${HOSTNAME}|g;\
+s|%SERVICE_NAME%|${NAME}|g;\
+s|%RELEASE_VSN%|${RELEASE_VSN}|" ${file}.tmp > ${file}
+   rm ${file}.tmp
+done
+
+case "${opt_no_root}" in
+( true )
+  warn "Option --no-root given. Not checking for correct ownership of installation."
+  ;;
+( * )
+  inform "Ensure that the installation in ${ERL_ROOT} has the
+    correct ${service_acct}:${service_grp} ownership."
+  if chown -R ${service_acct}:${service_grp} ${ERL_ROOT}
+  then
+    inform "Changed ownership of ${service_home} to ${service_acct}:${service_grp}"
+  else
+    error "Cannot change ownership of ${service_home} to ${service_acct}:${service_grp}"
+  fi
+  ;;
+esac
+
+if svcs -H erlang_epmd ;
+then unset opt_with_epmd ;
+     warn "Reusing existing EPMD service." ;
+fi ;
+
+inform "Extract and activate the SMF files."
+case "${opt_no_root}-${opt_no_smf}-${system_class}" in
+( false-false-SunOS-5.10-* )
+
+  for each in \
+    ${ERL_ROOT}/SMF/erlang_service \
+    ${opt_with_epmd:+$ERL_ROOT/erts-$ERTS_VSN/bin/epmd} ;
+  do
+    [ -f "${each}" ] || continue ;
+    file="/lib/svc/bin/${each##*/}" ;
+    if [ -f "${file}" ] ;
+    then
+      inform "${file} exists, moving to ${file}.${Backup_Suffix}" ;
+      mv "${file}" "${file}.${Backup_Suffix}"
+    fi
+    cp "${each}" "${file}"
+    chown root:sys "${file}"
+    chmod a+xr,a-w "${file}"
+  done
+
+  for each in \
+    ${NAME}:manifest.xml \
+    ${opt_with_epmd:+erlang_epmd:erlang_epmd.xml} ;
+  do
+    name="${each%:*}" ;
+    file="/var/svc/manifest/application/${name}.xml" ;
+    if [ -f "${file}" ] ;
+    then
+      inform "${file} exists, moving to ${file}.${Backup_Suffix}" ;
+      mv "${file}" "${file}.${Backup_Suffix}"
+    fi
+
+    sed -e "
+  s|%SVC_NAME%|${NAME}|g;
+  s|%ERL_ROOT%|${ERL_ROOT}|g;
+  s|%SVC_HOME%|${service_home}|g;
+  s|%SVC_USER%|${service_acct}|g;
+  s|%SVC_GRP%|${service_grp}|g;
+  " < "${ERL_ROOT}/SMF/${each#*:}" > "${file}" ;
+
+    chown root:sys "${file}"
+    /usr/sbin/svccfg validate "${file}"
+    /usr/sbin/svccfg import "${file}"
+    
+  done
+
+  ;;
+( *-true-* )
+  warn "SMF installation suppressed with option --no-smf."
+  ;;
+( * )
+  inform "SMF is not required."
+  ;;
+esac
+
+
+
+stunnel_seed="${ERL_ROOT}/stunnel-random-seed"
+dd if=/dev/random bs=128 count=1 2>/dev/null > "${stunnel_seed}" \
+&& chown ${service_acct}:${service_grp} "${stunnel_seed}"
+
+inform "Script ${self} completed successfully."
+
+#   E n d   o f   s c r i p t
+
+

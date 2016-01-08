@@ -1,0 +1,8 @@
+{release,
+ {"Cluster-Cache allocator demo","allocator-%VSN%"},
+ {erts,              "%erts%"},
+ [{kernel,           "%kernel%"},
+  {stdlib,           "%stdlib%"},
+  {sasl,             "%sasl%"},
+  {allocator,        "%allocator%"}
+ ]}.

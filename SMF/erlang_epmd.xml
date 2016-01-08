@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE service_bundle SYSTEM "/usr/share/lib/xml/dtd/service_bundle.dtd.1">
+<!--
+pragma ident "@(#)erlang_epmd.xml 1.0 29/01/07 SMI"
+-->
+<service_bundle
+ type="manifest"
+ name="erlang_epmd">
+
+  <service
+   name="application/erlang_epmd"
+   type="service"
+   version="1">
+
+    <single_instance/>
+
+    <dependency
+     name="filesystem"
+     grouping="require_all"
+     restart_on="none"
+     type="service">
+        <service_fmri value="svc:/system/filesystem/local"/>
+    </dependency>
+
+    <dependency
+     name="network-service"
+     grouping="require_all"
+     restart_on="none"
+     type="service">
+        <service_fmri value="svc:/network/service"/>
+    </dependency>
+
+    <exec_method
+     type="method"
+     name="start"
+     exec="/lib/svc/bin/epmd -daemon"
+     timeout_seconds="10">
+     <method_context
+      working_directory='/tmp' >
+       <method_credential
+        user='epmd'
+        group='erlang' />
+       <method_environment>
+         <envvar
+          name='HOME'
+          value='/tmp'/>
+       </method_environment>
+     </method_context>
+    </exec_method>
+
+    <exec_method
+     type="method"
+     name="stop"
+     exec="/lib/svc/bin/epmd -kill"
+     timeout_seconds="10">
+     <method_context
+      working_directory='/tmp' >
+       <method_credential
+        user='epmd'
+        group='erlang' />
+       <method_environment>
+         <envvar
+          name='HOME'
+          value='/tmp'/>
+       </method_environment>
+     </method_context>
+    </exec_method>
+
+    <instance name="default" enabled="true"/>
+
+    <stability value="Unstable"/>
+
+    <template>
+      <common_name>
+        <loctext xml:lang="C">
+          T-Mobile erlang_epmd service
+        </loctext>
+      </common_name>
+    </template>
+
+  </service>
+
+</service_bundle>

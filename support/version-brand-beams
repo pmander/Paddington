@@ -1,0 +1,30 @@
+#!/bin/bash
+#
+# $Id: ident 21639 2012-06-15 11:59:20Z pmander $
+# $URL: https://edna-mode.t-mobile.co.uk/svn/evasdev/Staff/pmander/bash-scripts/ident $
+#
+# Extract the $keyword:string$ sequences from binary or text files. This
+# script emulates the RCS utility ident written by Walter F. Tichy and Paul
+# Eggert. The tr operation enables sed to operate on printable characters,
+# enabling ident to be used on ELF binaries and Erlang beam files.
+
+function do_sed
+{
+  [ -e /usr/xpg4/bin/sed ] \
+  && /usr/xpg4/bin/sed -n 's/^\([A-Za-z]\{2,\}:[[:print:]]*\)$/$\1$/gp' \
+  || /bin/sed -n 's/^\([A-Za-z]\{2,\}:[[:print:]]*\)$/$\1$/gp'
+}
+
+function main
+{ local Line ;
+  do_sed < <( tr '$' '\n' < "$1" ; echo ) | while read Line ;
+  do case "$Line" in
+     '$GitCommit: '*) mv "$1" "$1.${Line:12:7}" ;;
+     esac ;
+  done
+}
+
+for each
+do
+  main "$each"
+done

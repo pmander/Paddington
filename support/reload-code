@@ -1,0 +1,67 @@
+#!/bin/bash
+
+function report
+{
+  echo "${Self}: ${@//
+/
+$Self: }" >&2
+}
+
+declare -r Host_Name=$(hostname)
+declare -r Self=${0##*/}
+
+declare All_Names=' '
+
+mkdir -p 'tmp/reloaded-lists'
+
+for each_file in tmp/reload-lists/reload-list* ;
+do
+  [ -f "${each_file}" ] || continue ;
+  report "loading file ${each_file}"
+  while read line ;
+  do
+    name="${line##*/}"
+    name="${name%.beam}"
+    eval "let ${name}=${name}+1"
+    if [ "${!name}" == '1' ] ; then report "reloading ${name}" ; fi
+    All_Names="${All_Names// $name / }${name} "
+  done < "${each_file}"
+  mv "${each_file}" "${each_file//reload-list/reloaded-list}"
+done
+
+All_Names=$(echo ${All_Names}) # strip unnecessary spaces
+Modules="${All_Names// /,}"
+
+#
+# NOTE: I found that the way Apple Macs resolve their own address is not
+#       well understood by Erlang. In the /etc/hosts file the actual host
+#       name has to appended after 'localhost', e.g for host 'Amateur':
+#
+#       127.0.0.1       localhost Amateur
+#
+#       Also, Macs insist on appending '.local' which confuses Erlang. This
+#       suffix is stripped in the ${node_name}
+#
+for each_rel in releases/*/src/*.rel.src ;
+do
+  [ -f "${each_rel}" ] || continue
+  node_name="${each_rel##*/}"
+  node_name="${node_name%.rel.src}@${Host_Name%.local}" # cope with Mac-isms
+  erl \
+  -sname code_reload \
+  -noshell \
+  -hidden \
+  -eval "case net_adm:ping('${node_name}')
+         of pong ->
+             [ begin
+                 rpc:call('${node_name}',code,purge,[File],5000),
+                 rpc:call('${node_name}',code,soft_purge,[File],5000),
+                 rpc:call('${node_name}',code,load_file,[File],5000),
+                 io:format(\"${Self}: File ~p is uploaded to ${node_name}~n\"
+                          ,[File])
+               end
+             || File  <- [${Modules}] ]
+         ; pang -> io:format(\"${Self}: failed to reach ${node_name}~n\")
+         end." \
+  -run erlang halt
+done

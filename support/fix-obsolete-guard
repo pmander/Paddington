@@ -1,0 +1,44 @@
+#!/bin/bash
+
+#
+# If the compiler output is overwhelmed with
+#
+# "Warning: variable Blah is unused",
+#
+# this script will produce another script as its output that will modify the
+# offending files, adding a '_' prefix to those variable names that are
+# unused. Usage example:
+#
+# make > ./log-file 2>&1
+# ./support/fix-unused-var ./log-file > ./script
+# source ./script
+#
+# Recompile the result to ensure that the changes are at least legal.
+#
+#
+
+
+Last_File=''
+Regexp=''
+while read Position Message ;
+do
+  case "$Message" in
+  'Warning: '*/[12]' obsolete')
+    Tmp="${Message#Warning: }" ;
+    Guard="${Tmp%/[12] obsolete}" ;
+    File="${Position%:*:}" ;
+    Tmp="${Position#*:}" ;
+    Line="${Tmp%:}"
+    if [ "${File}" == "${Last_File}" ] ;
+    then
+      Regexp="${Regexp}${Line}s/\\([^_0-9A-Za-z]\\)\\(${Guard}(\\)/\\1is_\\2/;"
+    else
+      echo "${Last_File}" >&2 ;
+      [ -f "${Last_File}" ] && echo "mv '${Last_File}' './tmp/tmp.erl' && sed '${Regexp%;}' < './tmp/tmp.erl' > '${Last_File}'"
+      Last_File="${File}"
+      Regexp="${Line}s/\\([^_0-9A-Za-z]\\)\\(${Guard}(\\)/\\1is_\\2/;"
+    fi
+  esac ;
+done < <(sed -n '/^lib[/]/p' | sort)
+echo "${Last_File}" >&2 ;
+[ -f "${Last_File}" ] && echo "mv '${Last_File}' './tmp/tmp.erl' && sed '${Regexp%;}' < './tmp/tmp.erl' > '${Last_File}'"

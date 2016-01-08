@@ -1,0 +1,27 @@
+#!/bin/bash
+
+#
+# This script will convert the old Erlang type guards into the new one with
+# the 'is_' prefix.  Guards in comments are not changed.  Lines with more
+# than one type guard will only have one of the guards converted, but this
+# can be solved by running the script again, until all guards are updated.
+#
+
+
+regexp='s;\(^[^%]*[^0-9A-Za-z_'"'"'%]\)\(atom\|binary\|function\|integer\|list\|pid\|tuple\)\(([^,)]*)\);\1is_\2\3;g;s/\(^[^%]*[^-0-9A-Za-z_'"'"'%]\)\(record\)\(([^,]*,[^,)]*)\)/\1is_\2\3/g'
+
+
+if sed --version ;
+then
+
+   for x in ./lib/*/src/*.erl;
+   do
+      sed "${regexp}" \
+         < "${x}" \
+         > "${x}.sed" ;
+      mv "${x}.sed" "${x}"
+   done
+
+else
+   echo "Please use GNU sed only. Version 4.2.1 is known to work." >&2
+fi

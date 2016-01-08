@@ -1,0 +1,213 @@
+#!/bin/sh
+# $Id: service.src 23263 2013-02-21 10:41:51Z pmander $
+# $URL: https://edna-mode.t-mobile.co.uk/svn/evasdev/Projects/sevas/TMUK-sevas-12.2/bin/service.src $
+# $Author: pmander $
+# $Date: 2013-02-21 10:41:51 +0000 (Thu, 21 Feb 2013) $
+# $Rev: 23263 $
+#
+# This program invokes the erlang emulator by calling run_erl.
+# It should only be used at an embedded target system.
+# It should be modified to give the correct flags to erl (via start_erl),
+# e.g -mode embedded -sname XXX
+#
+# Usage: start [Data]
+#
+# Updated by F. Cesarini for Erlang 5.3 on 2003-11-25
+# modified on 2007-04-12 by pmander for incorporation into the Install-script.
+#
+# This is a patched file, not the one supplied with Erlang/OTP
+#
+
+TERM=xterm 
+export TERM
+
+UID=`id`
+case $UID in
+uid=0\(*)
+  echo "\033[31;44;01m
+       You MUST NOT RUN AS ROOT to
+       start and stop ${SNAME}.
+\033[39;49;00m
+" >&2
+  exit 1
+  ;;
+esac
+
+ERL_CRASH_DUMP_SECONDS=10
+export ERL_CRASH_DUMP_SECONDS
+
+ERL_MAX_ETS_TABLES=10000
+export ERL_MAX_ETS_TABLES
+
+# USERNAME is required for QuickCheck licence refresh
+USERNAME='%USER%'
+export USERNAME
+
+OPTION_HEART='%OPTION_HEART%'
+ROOTDIR='%FINAL_ROOTDIR%'
+SNAME='%NAME%'
+SETCOOKIE='%COOKIE%'
+NODE_NAME="%NODE_NAME%"
+
+if [ "$USER" ]
+then
+  echo "\033[31;44;01m
+
+       You REALLY should be using SMF to
+       start and stop ${SNAME}.
+
+       Only use ${SNAME}/bin/start
+       during deployment and installation.
+\033[39;49;00m
+" >&2
+fi
+
+ulimit -n 4096
+
+MEM_REQUIRED=32768 ;
+MEM_CAPACITY=`/usr/sbin/prtconf 2>/dev/null | sed -n 's/^Memory size: \([0-9]*\) Megabytes/\1/p'` ;
+
+if [ "$MEM_CAPACITY" -lt "$MEM_REQUIRED" ] ;
+then echo "NOT ENOUGH RAM! Only ${MEM_CAPACITY}Mb, need at least ${MEM_REQUIRED}Mb" ;
+else  echo "Sufficient RAM, ${MEM_CAPACITY}Mb is available" ;
+fi
+
+SHELL_DIR="${ROOTDIR}/shell/"
+mkdir -p "${SHELL_DIR}"
+mkdir -p "${ROOTDIR}/log"
+
+#
+# http://erlang.org/doc/man/heart.html
+#
+# If the system should be rebooted because of missing heart-beats, or a
+# terminated Erlang runtime system, the environment variable HEART_COMMAND
+# has to be set before the system is started.  If this variable is not set,
+# a warning text will be printed but the system will not reboot.  However,
+# if the hardware watchdog is used, it will trigger a reboot
+# HEART_BEAT_BOOT_DELAY seconds later nevertheless (default is 60).
+#
+# To reboot on the WINDOWS platform HEART_COMMAND can be set to heart
+# -shutdown (included in the Erlang delivery) or of course to any other
+# suitable program which can activate a reboot.
+#
+# The hardware watchdog will not be started under Solaris if the environment
+# variable HW_WD_DISABLE is set.
+#
+# The HEART_BEAT_TIMEOUT and HEART_BEAT_BOOT_DELAY environment variables can
+# be used to configure the heart timeouts, they can be set in the operating
+# system shell before Erlang is started or be specified at the command line:
+#
+# erl -heart -env HEART_BEAT_TIMEOUT 30 ...
+#
+# The value (in seconds) must be in the range 10 < X <= 65535.
+#
+HEART_COMMAND="${ROOTDIR}/bin/erl_heart"
+export HEART_COMMAND
+HEART_BEAT_TIMEOUT=60
+export HEART_BEAT_TIMEOUT
+HEART_BEAT_BOOT_DELAY=300
+export HEART_BEAT_BOOT_DELAY
+
+# Undocumented environment variable for debugging.
+#HEART_DEBUG=1
+#export HEART_DEBUG
+
+cd "${ROOTDIR}"
+
+if [ -z "${RELDIR}" ]
+then
+   RELDIR="${ROOTDIR}/releases"
+fi
+
+METHOD="$1"
+
+START_ERL_DATA="${2:-${RELDIR}/start_erl.data}"
+
+#
+# -async_shell_start
+#     start shell in parallel, to be immediately responsive to user input
+# -hidden
+#     suppress creating a fully interconnected mesh of nodes to speed startup
+# -mode embedded
+#     load all code during startup
+# -sname ${SNAME}
+#     enable distribution
+# -setcookie ${SETCOOKIE}
+#     don't use ${HOME}/.erlang_cookie file
+# -heart
+#     execute ${HEART_COMMAND} when nodes stop responding to heartbeats
+# -pa ${ROOTDIR}/patches/
+#     load patches in preference to original code
+# +B [ c | d | i ]
+#     The c option makes Ctrl-C interrupt the current shell
+#     instead of invoking the emulator break handler.
+#     The d option (same as specifying +B without an extra
+#     option) disables the break handler.
+#     The i option makes the emulator ignore any break
+#     signal.
+# +A 10
+#     set number of threads in pool to enable the driver to perform
+#     time-consuming, blocking operations without blocking the emulator
+# +R9
+#     preserve compatibility with R9 erlang distribution protocols
+#     (not specified by default, only needed for legacy services.)
+# -smp auto
+#     enable SMP multicore support in the virtual machine, when available
+#
+
+rpc_call="rpc:call( '${NODE_NAME}',init,stop,[],5000)"
+
+case "${METHOD}" in
+'stop')
+
+echo "Stopping ${SNAME} using ${rpc_call}" >&2
+
+"${ROOTDIR}/bin/erl" \
+-noshell \
+-hidden \
+-sname "${SNAME}_killer" \
+-setcookie "${SETCOOKIE}" \
+-eval "${rpc_call}" \
+-run erlang halt
+
+;;
+'start')
+
+echo "Starting ${SNAME}..." >&2
+
+# ticket:1878 "Startup failure caused by truncated snmpa_vacm.db"
+# Suggested remedy: modify the ${ROOTDIR}/bin/service script to delete the
+# ${ROOTDIR}/config/snmp_conf/snmpa_vacm.db file.
+rm -f ${ROOTDIR}/config/snmp_conf/snmpa_vacm.db
+
+DATETIME=`date -u '+%Y%m%dT%H%M%SZ'`
+tar -cf "${ROOTDIR}/log_sasl_logfiles-${DATETIME}.tar" \
+"${ROOTDIR}/sasl_logfiles" \
+"${ROOTDIR}/log"
+
+"${ROOTDIR}/bin/run_erl" -daemon \
+  "${SHELL_DIR}" \
+  "${ROOTDIR}/log" \
+  "exec \
+${ROOTDIR}/bin/start_erl ${ROOTDIR} ${RELDIR} ${START_ERL_DATA} \
+-async_shell_start \
+-hidden \
+-sname ${NODE_NAME} \
+-setcookie ${SETCOOKIE} \
+"${OPTION_HEART}" \
+-pa ${ROOTDIR}/patches/ \
++Bi \
++A1024 \
++P134217727 \
+-smp auto"
+
+;;
+*)
+
+echo "Invalid option. Usage:
+$0 { start | stop }
+"
+
+;;
+esac
+

@@ -1,0 +1,668 @@
+#!/bin/bash
+
+#
+#   G l o b a l   i n v a r i a n t s
+#
+
+#
+# Coloured output
+#
+declare -r BOLD=$'\E[01m'
+declare -r RESET=$'\E[39;49;00m'
+declare -r COL_RED=$'\E[31;01m'
+declare -r COL_GRN=$'\E[32;01m'
+declare -r COL_YEL=$'\E[33;01m'
+declare -r COL_BLU=$'\E[34;01m'
+declare -r COL_MAG=$'\E[35;01m'
+declare -r COL_CYN=$'\E[36;01m'
+
+declare -r HELP_PREFIX="${COL_BLU}Help:${RESET} "
+declare -r INFO_PREFIX="${COL_GRN}Info:${RESET} "
+declare -r WARN_PREFIX="${COL_YEL}Warn:${RESET} "
+declare -r ERROR_PREFIX="${COL_RED}Error:${RESET} "
+
+declare -r date=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+
+declare -r system_class=$(echo "$(uname -s)-$(echo $(uname -r) | sed -n 's/\([0-9]*\.[0-9]*\).*/\1/p')-$(uname -p)")
+
+declare -r self_id='$Id: SMF-script 16546 2011-02-10 10:58:41Z pmander $'
+
+declare -r self="$(basename ${0})"
+
+declare -r HOSTNAME="$(hostname)"
+declare -r DOMAINNAME="$(domainname)"
+
+declare -r log_output="$(pwd)/logs/${self}-${date}.log"
+
+#
+#   F u n c t i o n   d e f i n i t i o n s
+#
+
+
+#
+# Prepare log file output
+#
+function log_file_header
+{
+  declare -r log_dir="${log_output%/*}"
+  declare -r log_filename="${log_output##*/}"
+  declare -r log_latest="${self}-latest.log"
+
+  'mkdir' -p "${log_dir}"
+  cat > "${log_output}" << EOF
+_____________________________________________________________________________
+
+       log file: ${log_filename}
+ generated with: ${self_id}
+        command: ${0} ${@}
+            pwd: $(pwd)
+           host: ${HOSTNAME}.${DOMAINNAME}
+_____________________________________________________________________________
+
+EOF
+
+  ( 'cd' "${log_dir}" \
+  && 'rm' -f "${log_latest}" \
+  && 'ln' -s "${log_filename}" "${log_latest}"
+  )
+  return 0
+}
+
+#
+# Logging functions
+#
+function log_msg # [prefix [message]]
+{
+  prefix="${1}"
+  shift
+  rest="${@}"
+  echo -n -e "${rest:+${prefix}}${rest//
+/
+${prefix}}${rest:+\n}" | tee -a ${log_output} >&2
+}
+
+function info # message
+{
+  log_msg "${INFO_PREFIX}" "${@}"
+}
+
+function warn # message
+{
+  log_msg "${WARN_PREFIX}" "${@}"
+}
+
+#
+# Abort the script with an optional message and error code
+# Only append the prefix and feed a line if there's a message specified.
+#
+function abort # [ message ]
+{
+  log_msg "${ERROR_PREFIX}" "${@}"
+  if [[ "${debug:+true}" == "true" ]]
+  then
+    log_msg "${ERROR_PREFIX}" "Debugging, so continuing..." >&2
+  else
+    exit -1
+  fi
+}
+
+#
+# Examine the results from the wrapper functions below
+# and grumble when it all gone pear-shaped.
+#
+function grumble # cmd result
+{
+  local cmd="${1}"
+
+  local return_value="${2##*
+}"
+
+  local grumble="${2%
+${return_value}}"
+
+  if [[ ${return_value} != "0" ]]
+  then
+    abort "
+command:  ${cmd//
+/
+command:  }
+grumble:  ${grumble//
+/
+grumble:  }
+returns:  ${return_value}
+"
+  fi
+}
+
+#
+# Wrap simple commands to capture output to stdout and stderr to be
+# written to console and to the log file and to abort in the event
+# of failure
+#
+# The echo $? at the end captures the return code in ${result}
+#
+function wrap # whatever commands
+{
+  local result=$( "$@" 2>&1 ; echo "$?" )
+
+  grumble "$*" "${result}"
+}
+
+#
+# Wrapper for tar to capture output to stderr to be written to
+# console and to the log file and to abort in the event of failure
+#
+function untar # tarball file_name destination
+{
+  local tarball="${1}"
+  local file_name="${2}"
+  local destination="${3}"
+
+  local result=$( (cd "${destination}" \
+  && tar -xf - "${file_name}" ) \
+  < "${tarball}" 2>&1 ; echo "$?" )
+  
+  grumble "$*" "${result}"
+}
+
+#
+# Wrapper for sed to capture output to stderr to be written to the
+# log file and to abort in the event of failure
+#
+# Don't use semicolons in the sed_commands, use newlines instead. Any
+# semicolons will make the array assignment choke if sed throws up.
+#
+function do_sed # file_name sed_commands
+{
+  local file_name="${1}"
+  local sed_commands="${2}"
+
+  wrap mv "${file_name}" "${file_name}.tmp"
+
+  # The cryptic 3, 1, 2 dance below is to swap stderr with stdout
+  # so that the error messages may be captured in ${result}
+  # Pretty, isn't it?
+  local result=$(sed -e "${sed_commands}" \
+  < "${file_name}.tmp" \
+  2> "${file_name}" 3>&1 1>&2 2>&3 \
+  && rm "${file_name}.tmp" \
+  ; echo "$?" )
+
+  grumble "$*" "${result}"
+}
+
+#
+# Usage information
+#
+function usage
+{
+  log_msg "${HELP_PREFIX}" "
+${BOLD}Usage:${RESET}
+
+  ${self} [ options ]
+
+Where available options are:
+
+  ${BOLD}--help${RESET}
+    Show this message and exit.
+    Optional.
+
+  ${BOLD}--name=<service-name>${RESET}
+    Set the Erlang Service Name, where <service-name> is one or more
+    comma separated Erlang service names, e.g:
+
+      --name=toddle,wobble,tumble
+
+    Mandatory, unless the NAME environment variable is set. This can
+    be done by setting the environment variable SNMP_INTERFACE on
+    the command line:
+
+      NAME=<service-name> ${self} [options]
+
+  ${BOLD}--epmd-file=<epmd-file>${RESET}
+    Give the location of an alternate Erlang EPMD executable binary
+    file
+
+  ${BOLD}--user-account=<user-account>${RESET}
+    Specify the user account in which the Erlang applications and
+    service is installed.
+
+  ${BOLD}--root-dir=<root-directory>${RESET}
+    Specify an alternative location for directories var/ and lib/
+    extracted from the tarballs. Useful while debugging, so that
+    files may be extracted and processed locally without need to
+    affect operating system files.
+
+  ${BOLD}--debug${RESET}
+  ${BOLD}--debug=<arcane-magick-formula>${RESET}
+    Only useful for debugging the script to ensure that errors are
+    trapped and reported, not really for debugging failed
+    installations.
+
+    This will force the script to continue regardless of any
+    failures encountered, and also provoke a few failues for good
+    measure too.
+
+    Supplying an <arcane-magick-formula> may have an effect, but it
+    may not have the effect anticipated :-)
+
+All output of every execution of ${self} is stored in the logs
+directory.
+This output text is stored as:
+  ${log_output}.
+(End of usage text)"
+  exit 0
+}
+
+#
+# Parse command line options and parameters.
+#
+function parse_options # option-list
+{
+  while [[ "$#" != "0" ]]
+  do
+    case "${1}" in
+    ( --help )
+      usage
+      ;;
+    ( --debug )
+      debug="true"
+      ;;
+    ( --debug=* )
+      debug="${1#*=}"
+      ;;
+    ( --root-dir=* )
+      opt_root_dir="${1#*=}"
+      ;;
+    ( --root-dir )
+      shift
+      opt_root_dir="${1}"
+      ;;
+    ( --name=* )
+      opt_service_name="${1#*=}"
+      ;;
+    ( --name )
+      shift
+      opt_service_name="${1}"
+      ;;
+    ( --epmd-file=* )
+      opt_epmd_file="${1#*=}"
+      ;;
+    ( --epmd-file )
+      shift
+      opt_epmd_file="${1}"
+      ;;
+    ( --user-account=* )
+      opt_user_account="${1#*=}"
+      ;;
+    ( --user-account )
+      shift
+      opt_user_account="${1}"
+      ;;
+    ( * )
+      abort "Unrecognised parameter: ${1}"
+      ;;
+    esac
+    shift
+  done
+}
+
+#
+# Check for root permissions
+#
+function assert_root
+{
+  # There are (at least) two versions of id in Solaris, and
+  # depending on $PATH settings, the -u option may or may
+  # not work.  To avoid depending on paths, use the default
+  # output which works on all platfroms, Solaris and Linux
+  # alike.
+  case "$(id | sed -n 's/^uid=\([0-9]*\).*gid=\([0-9]*\).*/uid=\1,gid=\2/p')" in
+  ( uid=0,gid=0 )
+    info "Running as root. Good."
+    ;;
+  ( uid=*,gid=* )
+    abort "Not running as root. Bad."
+    ;;
+  ( * )
+    abort "Unable to parse id output to check for root permissions. Ugly."
+    ;;
+  esac
+}
+
+#
+# Merge and reconcile environment variables and
+# default values with command line options
+#
+
+declare service_home
+declare service_acct
+function merge_opt_and_env
+{
+  local tmp
+  service_acct="${opt_user_account:-$USER}"
+  service_home=$( sed -n "s/^${service_acct}:[^:]*:[^:]*:[^:]*:[^:]*:\([^:]*\):.*$/\1/p" < /etc/passwd )
+
+  service_name="${opt_service_name:-$NAME}"
+
+  # ensure a single trailing slash
+  root_dir="${opt_root_dir%${opt_root_dir##*[^/]}}/"
+
+  declare -a tmp
+  local epmd
+  if [[ -n "${opt_epmd_file}" ]]
+  then
+    epmd_file="${opt_epmd_file}"
+  else
+    for epmd in ${service_home}/*/erts-*/bin/epmd
+    do
+      tmp[${#tmp[@]}]="${epmd}"
+    done
+    if [[ ! -e "${tmp[0]}" ]]
+    then
+      abort "No copies of epmd found in ${service_home}"
+    elif [[ "${#tmp[@]}" != "1" ]]
+    then
+      abort "Found ${#tmp[@]} copies of epmd. ${tmp[@]/#/
+    * }
+Please specify which one should be used with --epmd-file=..."
+    else
+      epmd_file="${tmp[0]}"
+    fi
+  fi
+  info "service_acct=${service_acct}
+service_home=${service_home}
+service_name=${service_name}
+epmd_file=${epmd_file}"
+}
+
+#
+# SMF file creation function
+#
+# Create the method file, which is a shell script, using
+# the given service_name.
+#
+
+function smf_method # service_name start_cmd stop_cmd [bin_file ...]
+{
+  local service_name="$1"
+  shift
+  local start_cmd="$1"
+  shift
+  local stop_cmd="$1"
+  shift
+  local output_file="${root_dir}lib/svc/method/${service_name}"
+  local svc_bin="${root_dir}lib/svc/bin"
+  local _name _file
+
+  if [ -e "${output_file}" ]
+  then
+    warn "Replacing ${output_file}. The ${service_name} service already exists."
+    mv "${output_file}" "${output_file}.${date}.backup"
+  fi
+
+  while [[ "${1}" ]]
+  do
+    # Each of the bin_files
+    _name="${1##*/}"
+    _file="${svc_bin}/${_name}"
+    if [ -e "${_file}" ]
+    then
+      warn "Replacing ${_file}, it already exists."
+      mv "${_file}" "${_file}.${date}.backup"
+    fi
+    wrap cp "${1}" "${_file}"
+    wrap chown root:sys "${_file}"
+    wrap chmod a+xr,a-w "${_file}"
+    info "Installed ${_name} from ${1}"
+    shift
+  done
+
+  cat > "${output_file}" <<EOF
+#!/sbin/sh
+#
+# Copyright 2007 T-Mobile
+#
+# ident "@(#)${service_name} 1.0 07/01/29 SMI"
+#
+
+. ${root_dir}lib/svc/share/smf_include.sh
+
+HOME="${service_home}"
+export HOME
+PATH="${root_dir}lib/svc/bin:\$PATH"
+export PATH
+
+case "\$1" in
+'start')
+  ${start_cmd}
+  ;;
+'stop')
+  ${stop_cmd}
+  ;;
+*)
+  echo "Usage: \$0 { start | stop }" >&2
+  exit 1
+  ;;
+esac
+
+exit \$SMF_EXIT_OK
+EOF
+  wrap chown root:bin "${output_file}"
+  wrap chmod +x "${output_file}"
+}
+
+#
+# SMF file creation function
+#
+# Create the application file, which is XML data. The dependencies are
+# specified as "name=value,value,...".
+#
+
+function smf_application # service_name [ dep_name=dep_value,dep_value,... [...] ]
+{
+  local dependencies name all_values value fmri
+  local service_name="$1"
+  local output_file="${root_dir}var/svc/manifest/application/${service_name}.xml"
+
+  if [ -e "${output_file}" ]
+  then
+    warn "Replacing ${output_file}. The ${service_name} service already exists."
+    mv "${output_file}" "${output_file}.${date}.backup"
+  fi
+
+  info "smf_application output_file=${output_file}"
+
+  shift
+  while [[ "$1" != "" ]]
+  do
+    name="${1%=*}"
+    all_values="${1#*=}"
+    fmri=
+    for value in ${all_values//,/ }
+    do
+      fmri="${fmri}
+        <service_fmri value=\"${value}\"/>"
+    done
+    dependencies="${dependencies}
+    <dependency
+     name=\"${name}\"
+     grouping=\"require_all\"
+     restart_on=\"none\"
+     type=\"service\">${fmri}
+    </dependency>
+"
+    shift
+  done
+
+
+  cat > "${output_file}" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE service_bundle SYSTEM "/usr/share/lib/xml/dtd/service_bundle.dtd.1">
+<!--
+pragma ident "@(#)${service_name}.xml 1.0 29/01/07 SMI"
+-->
+<service_bundle
+ type="manifest"
+ name="${service_name}">
+
+  <service
+   name="application/${service_name}"
+   type="service"
+   version="1">
+
+    <single_instance/>
+    ${dependencies}
+    <exec_method
+     type="method"
+     name="start"
+     exec="${root_dir}lib/svc/method/${service_name} start"
+     timeout_seconds="10"/>
+
+    <exec_method
+     type="method"
+     name="stop"
+     exec="${root_dir}lib/svc/method/${service_name} stop"
+     timeout_seconds="10"/>
+
+    <instance name="default" enabled="true"/>
+
+    <stability value="Unstable"/>
+
+    <template>
+      <common_name>
+        <loctext xml:lang="C">
+          T-Mobile ${service_name} service
+        </loctext>
+      </common_name>
+    </template>
+
+  </service>
+
+</service_bundle>
+EOF
+  wrap chown root:sys "${output_file}"
+  wrap /usr/sbin/svccfg validate "${output_file}"
+  wrap /usr/sbin/svccfg import "${output_file}"
+}
+
+#
+# Extract, install and activate the SMF files
+#
+function install_smf_files
+{
+  service_acct="${opt_user_account:-$USER}"
+  local SMF_TARBALL
+  local each
+  local dst
+
+  case "${system_class}" in
+  ( SunOS-5.10-* )
+    # Note: no quotes around ${service_name} to separate into elements
+    for each_service in ${service_name//,/ }
+    do
+      SMF_TARBALL="SMF-${each_service}.tar"
+      if [[ -e "${SMF_TARBALL}" ]]
+      then
+        # If a tarball exists, it has precedence over generated SMF files.
+        info "Processing ${SMF_TARBALL}"
+        while read each # file in the tarball table of contents
+        do
+          # Strip leading dot-slash (./) from destination.
+          dst="${root_dir}${each#./}"
+
+          case ${each} in
+          ( */erlang_epmd.xml | */erlang_epmd )
+            # No processing is required for EPMD files after extraction.
+            if [ -e "${root_dir}lib/svc/method/erlang_epmd" ] \
+            && [ -e "${root_dir}var/svc/manifest/application/erlang_epmd.xml" ]
+            then
+              info "Not installing ${dst}. The EPMD service already exists."
+            else
+              wrap cp "${epmd_file}" ${root_dir}lib/svc/bin/epmd
+              wrap chown root:sys ${root_dir}lib/svc/bin/epmd
+              info "Installed ${root_dir}lib/svc/bin/epmd from ${epmd_file}"
+              untar "${SMF_TARBALL}" "${each}" "${root_dir}"
+              info "Extracted ${each} from ${SMF_TARBALL}"
+            fi
+            ;;
+          ( */${each_service}.xml | */${each_service} )
+            # Extract only files related to the service.
+            # The files must be processed after extraction
+            untar "${SMF_TARBALL}" "${each}" "${root_dir}"
+            info "modifying file ${dst}"
+            do_sed "${dst}" "s^%service_name%^${each_service}^
+s^%service_home%^${service_home}^"
+            info "modified ${dst}"
+            case ${dst} in
+            ( */method/* )
+              wrap chown root:bin ${dst}
+              wrap chmod +x ${dst}
+              ;;
+            ( */application/* )
+              info "svccfg processing ${dst}"
+              wrap chown root:sys ${dst}
+              wrap /usr/sbin/svccfg validate ${dst}
+              wrap /usr/sbin/svccfg import ${dst}
+              ;;
+            ( * )
+              abort "Unrecognised file in ${SMF_TARBALL}"
+              ;;
+            esac
+            ;;
+          ( * )
+            warn "Ignoring file ${each} found in ${SMF_TARBALL}"
+            ;;
+          esac
+
+        done < <( tar -tf ${SMF_TARBALL} )
+      else
+        info "No such file ${SMF_TARBALL}, using generic SMF method and manifest."
+        #
+        # TODO use functions smf_method and smf_application
+        #
+        case "${each_service}" in
+        ( 'erlang_epmd' )
+          smf_method 'erlang_epmd' \
+             "su - ${service_acct} -c \"${root_dir}lib/svc/bin/epmd -daemon\"" \
+             "su - ${service_acct} -c \"${root_dir}lib/svc/bin/epmd -kill\"" \
+             ${epmd_file} \
+          && smf_application 'erlang_epmd' \
+             'filesystem=svc:/system/filesystem/local' \
+             'network-service=svc:/network/service' \
+          || warn "Skipped SMF service for Erlang EPMD"
+          ;;
+        ( * )
+          smf_method "${each_service}" \
+            "su - ${service_acct} -c \"cd ${service_home}/${each_service} && TERM=vt100 ./bin/start &\"" \
+            "su - ${service_acct} -c \"cd ${service_home}/${each_service} && TERM=vt100 ./bin/stop &\"" \
+          && smf_application "${each_service}" \
+             "erlang_epmd=svc:/application/erlang_epmd" \
+          || abort "Failed to install SMF service for ${each_service}"
+          ;;
+        esac
+        wrap /usr/sbin/svcadm refresh "svc:/application/${each_service}"
+        wrap /usr/sbin/svcadm restart "svc:/application/${each_service}"
+      fi
+    done # each_service
+
+    info "modified all SMF configuration files successfully."
+    ;;
+  ( * )
+    abort "SMF can only be installed on Sun Microsystems Solaris 10."
+    ;;
+  esac
+}
+
+log_file_header
+parse_options "$@"
+merge_opt_and_env
+
+assert_root
+install_smf_files
+
+info "Script ${self} completed successfully."
+
+#   E n d   o f   s c r i p t
+
+

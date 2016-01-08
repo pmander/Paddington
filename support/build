@@ -1,0 +1,21 @@
+#!/bin/bash
+
+#
+# Convenience script to run 'make' and store the output in a log file.
+#
+
+Date_Now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+
+Self="${0##*/}"
+
+Log_File="./logs/${Self}-${Date_Now}.log"
+
+mkdir -p ./logs
+
+time make --jobs --quiet "$@" 2>&1 \
+| tee "${Log_File}"
+
+echo "log file: '${Log_File}'"
+
+
+

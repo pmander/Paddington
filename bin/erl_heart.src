@@ -1,0 +1,74 @@
+#!/bin/sh -x
+#
+# $Id: erl_heart.src 9985 2008-02-19 15:44:19Z pmander $
+# Francesco.Cesarini@t-mobile.co.uk, 13/11/03
+# Modified by Chandru: 27/10/2005 - Makes a copy of the SASL logfiles 
+#                                   and the erlang log files before 
+#                                   restarting the node
+#
+# Heart restart script that will ensure no cyclic restarts occur.
+# If a restart occured more than 15 minutes ago, erlang will
+# be restarted, else, nothing happens.
+#
+# USAGE: place this file in $ROOTDIR/erts-ETRS-VSN/bin and will be
+# copied and updated by the Install scripts
+#
+# Original version of date calculation:
+# http://www.sunmanagers.org/archives/1998/0585.html
+#
+# "Calculate number of days since the Unix time origin (1 Jan 1970)
+# Leap years are offset from 1972, but subtract one year, since `date +%j`
+# should account for leap days in the current year.
+# Only count full days, so decrement by one to truncate off the partial day.
+# Years divisible by 100 are not leap years unless they are divisible by 400.
+# So, 2000 *is* a leap year and will be handled correctly by this formula.
+# XXX This calculation with fail for all years after 2100, not inclusive."
+#
+# This calculation is portable across all versions of Solaris and Linux
+#
+# The 2100 limit is academic, the POSIX date will fail beyond 2038-01-19, as
+# demonstrated with GNU date:
+# $ date --utc --date "1970-01-01 $(((1 << 31) -1 )) sec"
+# Tue Jan 19 03:14:07 UTC 2038
+#
+# set -- `date -u '+%Y %j %H %M %S'`
+# UEPOCH_DAYS=`expr 365 \* \( $1 - 1970 \) + \( $1 - 1969 \) / 4 + $2 - 1`
+# MINS=`expr 60 \* $3 + $4`
+# SECS=`expr 3600 \* $3 + 60 \* $4 + $5`
+# UEPOCH_MINS=`expr 1440 \* $UEPOCH_DAYS + $MINS`
+# UEPOCH_SECS=`expr 86400 \* $UEPOCH_DAYS + $SECS`
+#
+
+
+ROOTDIR="%FINAL_ROOTDIR%"
+
+
+set `date -u '+%Y %j %H %M %S'`
+DAYS=`expr 365 \* \( $1 - 1970 \) + \( $1 - 1969 \) / 4 + $2 - 1`
+MINS=`expr 60 \* $3 + $4`
+NOW=`expr $MINS + $DAYS \* 1440`
+
+SASL_TMP_FILE="sasl_logfiles_$NOW"
+LOG_TMP_FILE="log_$NOW"
+
+FILE=".erl.restart"
+
+if [ -f $FILE ]
+then
+  TIME=`cat $FILE`
+  MINS_AGO=`expr $NOW - $TIME`
+  if [ $MINS_AGO -ge 15 ]
+  then
+     echo "Heart restarting Erlang. Last restart was $MINS_AGO minutes ago."
+     echo $NOW > $FILE
+     cp -R $ROOTDIR/sasl_logfiles $ROOTDIR/$SASL_TMP_FILE
+     cp -R $ROOTDIR/log $ROOTDIR/$LOG_TMP_FILE
+     $ROOTDIR/bin/start
+  else
+     echo "Heart not restarting Erlang. Last restart was $MINS_AGO minutes ago."
+  fi
+else
+  echo $NOW > $FILE
+  $ROOTDIR/bin/start
+fi
+

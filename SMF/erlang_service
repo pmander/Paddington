@@ -1,0 +1,24 @@
+#!/sbin/sh
+# Start/stop erlang service
+#
+.. /lib/svc/share/smf_include.sh
+
+case "$1" in
+'start')
+        $ERL_ROOT/bin/service start
+        sleep 2
+        ;;
+'restart')
+        $ERL_ROOT/bin/service restart
+        sleep 2
+        ;;
+'stop')
+        $ERL_ROOT/bin/service stop
+        ;;
+*)
+        echo "Usage: $0 { start | stop }"
+        exit 1
+        ;;
+esac
+exit $SMF_EXIT_OK
+

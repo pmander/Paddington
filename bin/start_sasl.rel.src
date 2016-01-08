@@ -1,0 +1,9 @@
+%
+% This is a copy of the start_sasl.rel file in the OTP distribution. It is
+% used as the default start script when launching the Erlang runtime from
+% ./bin/erl, during maintenance or installation.
+%
+{release, {"OTP  APN 181 01","R13B04"}, {erts, "%erts%"},
+ [{kernel,"%kernel%"},
+  {stdlib,"%stdlib%"},
+  {sasl, "%sasl%"}]}.

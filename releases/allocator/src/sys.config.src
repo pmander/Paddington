@@ -1,0 +1,61 @@
+%% This file is identified via the erl command line option -config File.
+%% Note that File should have no extension, e.g.
+%% erl -config .../sys (if this file is called sys.config)
+%%
+%% In this file, you can redefine application environment variables.
+%% This way, you don't have to modify the .app files of e.g. OTP applications.
+%%
+%% For this example, we set the kernel environment variables for 
+%% the distributed application controller. In order to run this
+%% example on your machine, you must change the node names below.
+%% See erl -man application for a thorough description of what is
+%% possible to configure.
+[{kernel,
+  [{net_ticktime, 90},
+   {start_os, true},
+   {start_timer, true},
+   {start_ddll, true},
+   {inet_dist_listen_min, 22200},
+   {inet_dist_listen_max, 22210},
+   {sync_nodes_optional, []},
+   {sync_nodes_timeout, 3000}]},
+
+ {sasl,
+  [{error_logger_mf_dir,
+    "%ROOT_DIR%/sasl_logfiles/"},
+   {error_logger_mf_maxbytes, 100000},
+   {error_logger_mf_maxfiles, 8}]},
+
+ {snmp,
+  [
+   {agent,
+    [
+     {priority, normal},
+     {versions, [v1,v2,v3]},
+     {db_dir, "%ROOT_DIR%/config/snmp_conf/"},
+     {mib_storage, ets},
+     {target_cache, [{verbosity,silence}]},
+     {symbolic_store, [{verbosity,silence}]},
+     {local_db, [{repair,true},
+                 {auto_save,5000},
+                 {verbosity,silence}]},
+     {error_report_module, snmpa_error_logger},
+     {agent_type, master},
+     {agent_verbosity, silence},
+     {config, [{dir, "%ROOT_DIR%/config/snmp_conf"},
+               {force_load, true},
+               {verbosity, silence}]},
+     {multi_threaded, false},
+     {mib_server, [{mibentry_override,false},
+                   {trapentry_override,false},
+                   {verbosity,silence},{cache,true}]},
+     {note_store, [{timeout,30000},{verbosity,silence}]},
+     {net_if, [{module,snmpa_net_if},
+               {verbosity,silence},
+               {options,
+               [{bind_to,false},{no_reuse,false},{req_limit,infinity}]}]}
+    ]
+   }
+   ]}
+
+ ].

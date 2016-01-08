@@ -1,0 +1,61 @@
+#!/bin/bash
+
+#
+# If the compiler output is overwhelmed with
+#
+# "Warning: variable Blah is unused",
+#
+# this script will produce another script as its output that will modify the
+# offending files, adding a '_' prefix to those variable names that are
+# unused. Usage example:
+#
+# make > ./log-file 2>&1
+# ./support/fix-unused-var ./log-file > ./script
+# source ./script
+#
+# Recompile the result to ensure that the changes are at least legal.
+#
+#
+
+
+Last_File='' ;
+All_Func=',' ;
+Regexp='' ;
+while read Position Message ;
+do
+  case "$Message" in
+  'Warning: ambiguous call of overridden auto-imported BIF '*/[0-9])
+    Func="${Message#*BIF }" ;
+    File="${Position%:*:}" ;
+    if [ "${File}" == "${Last_File}" ] ;
+    then
+      if [ "${All_Func//,$Func,/}" == "${All_Func}" ] ;
+      then
+      	All_Func="${All_Func}${Func}," ;
+      fi
+    else
+      if [ "${All_Func//,$Func,/}" == "${All_Func}" ] ;
+      then
+      	All_Func="${All_Func}${Func}," ;
+      fi
+      All_Func="${All_Func%,}"
+      echo "${Last_File}" >&2 ;
+      if [ -f "${Last_File}" ] ;
+      then echo "mv '${Last_File}' './tmp/tmp.erl' && sed '/^[-]module(/ a\\
+-compile({no_auto_import,[${All_Func#,}]}).
+' < './tmp/tmp.erl' > '${Last_File}'"
+      fi ;
+      Last_File="${File}" ;
+      All_Func=",${Func}," ;
+    fi
+  esac ;
+done < <(sed -n '/^lib[/]/p' | sort)
+echo "${Last_File}" >&2 ;
+All_Func="${All_Func%,}"
+if [ -f "${Last_File}" ] ;
+then echo "mv '${Last_File}' './tmp/tmp.erl' && sed '/^[-]module(/ a\\
+-compile({no_auto_import,[${All_Func#,}]}).
+' < './tmp/tmp.erl' > '${Last_File}'"
+fi ;
+
+

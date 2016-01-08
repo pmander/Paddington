@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE service_bundle SYSTEM "/usr/share/lib/xml/dtd/service_bundle.dtd.1">
+<!--
+pragma ident "@(#)%SVC_NAME%.xml 1.0 29/01/07 SMI"
+-->
+<service_bundle
+ type="manifest"
+ name="%SVC_NAME%">
+
+  <service
+   name="application/%SVC_NAME%"
+   type="service"
+   version="1">
+
+    <single_instance/>
+    
+    <dependency
+     name="erlang_epmd"
+     grouping="require_all"
+     restart_on="refresh"
+     type="service">
+        <service_fmri value="svc:/application/erlang_epmd"/>
+    </dependency>
+
+    <exec_method
+     type="method"
+     name="start"
+     exec="/lib/svc/bin/erlang_service %m"
+     timeout_seconds="10">
+     <method_context
+      working_directory='%ERL_ROOT%' >
+       <method_credential
+        user='%SVC_USER%'
+        group='%SVC_GRP%' />
+       <method_environment>
+         <envvar
+          name='HOME'
+          value='%SVC_HOME%'/>
+         <envvar
+          name='ERL_ROOT'
+          value='%ERL_ROOT%'/>
+       </method_environment>
+     </method_context>
+    </exec_method>
+
+    <exec_method
+     type="method"
+     name="stop"
+     exec="/lib/svc/bin/erlang_service %m"
+     timeout_seconds="10">
+     <method_context
+      working_directory='%ERL_ROOT%' >
+       <method_credential
+        user='%SVC_USER%'
+        group='%SVC_GRP%' />
+       <method_environment>
+         <envvar
+          name='HOME'
+          value='%SVC_HOME%'/>
+         <envvar
+          name='ERL_ROOT'
+          value='%ERL_ROOT%'/>
+       </method_environment>
+     </method_context>
+    </exec_method>
+
+    <instance name="default" enabled="true"/>
+
+    <stability value="Unstable"/>
+
+    <template>
+      <common_name>
+        <loctext xml:lang="C">
+          T-Mobile %SVC_NAME% service
+        </loctext>
+      </common_name>
+    </template>
+
+  </service>
+
+</service_bundle>

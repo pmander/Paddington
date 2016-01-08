@@ -1,0 +1,480 @@
+#!/bin/bash
+#
+# $Id: make-package 16554 2011-02-11 12:51:22Z pmander $
+# $URL: https://edna-mode.t-mobile.co.uk/svn/evasdev/Projects/sevas/TMUK-sevas-12.2/support/make-package $
+# $Author: pmander $
+# $Date: 2011-02-11 12:51:22 +0000 (Fri, 11 Feb 2011) $
+# $Rev: 16554 $
+#
+# Create a self-extracting file which unpacks to produce a set of tarballs
+# and a script to process the contents of the tarballs.
+#
+# One of the tarballs is expected to be an OTP release tarball. There may be
+# an additional patch tarball containing applications not included in the
+# release tarball, to satisfy projects which manage loading applications
+# without using the Erlang/OTP framework such as GSSP for example.
+#
+# The script should contain ~placeholders~ which will be replaced while this
+# script runs. The placeholder names are:
+#
+#   ~ERTS_VSN~ The name and version of the Erlang RunTime System
+#
+#   ~RELEASE_VSN~ The name and version of the project
+#
+#   ~NAME~ The name of the project, same as above without the -${VSN}
+#   extension.
+#
+# Log output is stored in a logs/ directory.
+#
+# Coloured output for highlighted logging on VT100 compatible terminals.
+ESC_SEQ=$(echo -e "\x1b[")
+RESET="${ESC_SEQ}39;49;00m"
+COL_RED="${ESC_SEQ}31;01m"
+COL_GRN="${ESC_SEQ}32;01m"
+COL_YEL="${ESC_SEQ}33;01m"
+BOLD="${ESC_SEQ}01m"
+error="${COL_RED}Error:${RESET}"
+INFO_PREFIX="${COL_GRN}Info:  ${RESET}"
+WARN_PREFIX="${COL_YEL}Warn:  ${RESET}"
+ERROR_PREFIX="${COL_RED}Error: ${RESET}"
+
+script_version='$Id: make-package 16554 2011-02-11 12:51:22Z pmander $'
+
+date=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+
+self="$(basename ${0})"
+
+top=$(pwd)
+
+log_dir="${top}/tmp"
+'mkdir' -p ${log_dir}
+
+log_filename="${self}-${date}.log"
+log_output="${log_dir}/${log_filename}"
+log_latest="${self}-latest.log"
+cat > "${log_output}" << EOF
+_____________________________________________________________________________
+
+log file: ${log_filename}
+generated with ${script_version}
+${0} ${@}
+_____________________________________________________________________________
+
+EOF
+
+(cd "${log_dir}" \
+ && rm -f "${log_latest}" \
+ && ln -s "${log_filename}" "${log_latest}"
+)
+
+#
+# Logging functions which add highlighted prefixes depending on meaning.
+#
+function error
+{
+  echo -e "${ERROR_PREFIX} ${1//
+/
+${ERROR_PREFIX} }" | tee -a ${log_output}
+  exit 1
+}
+
+function warn
+{
+  echo -e "${WARN_PREFIX} ${1//
+/
+${WARN_PREFIX} }" | tee -a ${log_output}
+}
+
+function info
+{
+  echo -e "${INFO_PREFIX} ${1//
+/
+${INFO_PREFIX} }" | tee -a ${log_output}
+}
+
+function usage
+{
+  echo -e -n "${1:+${ERROR_PREFIX} ${1}\n}" >&2
+  echo " Usage: ${self} --script <script> --output <output> [file ...]" >&2
+  exit 1
+}
+
+
+function path_and_name
+{
+  # Return: ${path} and ${name} parts of argument ${1}
+  # basename and dirname, but using bash exclusively. Yes, I know that's
+  # silly, but this is how you do it without spawning an new shell.
+  case ${1} in   
+  ( */* )
+    path="${top}/${1%/*}"
+    name="${1##*/}"
+    ;;
+  ( * )
+    path="${top}"
+    name="${1}"
+    ;;
+  esac
+}
+
+function detect_architecture
+{
+  declare -r os_vsn=$(echo "$(uname -s)-$(echo $(uname -r) | sed -n 's/\([0-9]*\.[0-9]*\).*/\1/p')")
+  local system_class opt_arch
+
+  case $(uname -s) in
+  ( Darwin )
+    system_class="${os_vsn}-$(uname -p)"
+    ;;
+  ( SunOS )
+    opt_arch=$(optisa $(isalist))
+    system_class="${os_vsn}-${opt_arch}"
+    ;;
+  ( Linux )
+    case $(uname -p) in
+    ( unknown )
+      system_class="${os_vsn}-$(uname -m)"
+      ;; 
+    ( * )
+      system_class="${os_vsn}-$(uname -p)"
+      ;;
+    esac
+    ;;
+  esac
+  echo -n "${system_class}"
+}
+
+#
+# Check for needed utilities
+#
+for x in uudecode uuencode tar gzip sed;
+do
+  if ! type "$x" > /dev/null 2>&1 ;
+  then
+    error "$x not found" ;
+  fi
+done
+
+#
+# Parse command line parameters
+#
+#   --script the source script used during installation of the tarballs on
+#     the target machine.
+#
+#   --output the file name of the produced package file 
+#
+#   --patch comma separated list of files and directories to be included
+#     into the additional.patch.tar.gz tarball
+#
+#   Other parameters are assumed to be file names to be incorprated into the
+#   package, and are added to the ${packing_list}. The file names are
+#   stripped of their leading path and added to the ${extract_list}
+#
+packing_list=""
+extract_list=""
+while [[ "$#" != "0" ]]
+do
+  case "${1}" in
+  ( --script )
+    script_src="${2}"
+    shift
+    ;;
+  ( --output )
+    output="${2}"
+    shift
+    ;;
+  ( --patch )
+    opt_patch="${2//,/ }"
+    shift
+    ;;
+  ( * )
+    packing_list="${packing_list} ${1}"
+    extract_list="${extract_list} $(basename ${1})"
+    ;;
+  esac
+  shift
+done
+packing_list="${packing_list# }"
+
+#
+# Checking for mandatory file name parameters. If the output package file
+# name exists already, the original is renamed with a .${date} extension.
+#
+if [[ "${script_src}" && "${output}" ]]
+then
+  info "script_src=${script_src}
+output=${output}
+packing_list:
+ * ${packing_list// /
+ * }"
+else
+  error "usage: ${self} --script <script> --output <output> [file ...]"
+fi
+
+if [ -e ${output} ]
+then
+  warn "moving existing ${output} to ${output}.${date}"
+  chmod -x ${output}
+  mv ${output} ${output}.${date}
+fi
+
+[ -e ${script_src} ] || usage "Script file ${script_src} not found."
+
+#
+# Find the version of the designated Erlang runtime by extracting the
+# erts-${erts_vsn} from ERLDIR/erts-*
+#
+
+tmp=$(echo ${ERLDIR}/erts-*/)
+[ -d ${tmp} ] && info "found erts directory ${tmp}" || error "cannot find erts directory"
+tmp="${tmp#${ERLDIR}/erts-}"
+erts_vsn="${tmp%/}"
+info "erts_vsn=${erts_vsn}"
+
+#
+# Find the name and version of the release from the file name of the release
+# tarball.
+#
+tmp="${packing_list#*releases/}"
+rel_vsn="${tmp%%/*}"
+rel_name="${rel_vsn%%-[0-9]*}"
+[ -d releases/${rel_vsn}/ ] && info "found ${rel_vsn} directory" || error "cannot find ${rel_vsn} directory"
+
+#
+# Replace ~placeholder~ tokens with ${erts_vsn}, ${rel_name} and ${rel_vsn}
+# in ${script_src} file.
+#
+sys_arch=$( detect_architecture )
+script="Install-${rel_vsn}"
+:>"${script}"
+sed -e "s/~SYS_ARCH~/${sys_arch}/g;s/~ERTS_VSN~/${erts_vsn}/g;s/~RELEASE_VSN~/${rel_vsn}/g;s/~NAME~/${rel_name}/g" < "${script_src}" > "${script}"
+chmod +x "${script}"
+
+info "script='${script}'"
+
+#
+# Add each file in the ${packing_list} to the package tarball. Remove the
+# path before incorporating the files. If there's a ${patch_list} file,
+# create a separate patch tarball, the contents of which will be overlayed
+# upon the extracted contents of the release tarball. This is needed for
+# projects such as GSSP which loads applications itself instead of relying
+# on OTP.
+#
+path_and_name ${script}
+extract_list="${name}${extract_list}"
+tar_list="-C ${path} ${name}"
+for file in ${packing_list}
+do
+  path_and_name ${file}
+#  info "processing $file --> ${path}  /  ${name}"
+  patch_list="${file%.tar.gz}.patch-list"
+  patch_name="${name%.tar.gz}.patch.tar.gz"
+  app_list=
+  patch_tar=
+  if [[ -f "${patch_list}" ]]
+  then
+    warn "add applications from patch list ${patch_list}"
+    while read app
+    do
+      [ -d "${app}" ] && warn " * ${app}" || error "no ${app} found"
+      app_list="${app_list} ${app}"
+    done < ${patch_list}
+    tar -cf - ${app_list} | gzip > "${path}/${patch_name}"
+    patch_tar="-C ${path} ${patch_name}"
+    extract_list="${extract_list} ${patch_name}"
+  fi
+  if [[ -f ${file} ]]
+  then
+    tar_list="${tar_list} -C ${path} ${name} ${patch_tar}"
+  else
+    possible=""
+    (while read seek
+     do
+       possible="${possible} ${seek}"
+     done
+    ) < <(find ${path} -name '*.rel.src')
+    error "file ${file} not found
+This can be due to the .rel.src file not
+sharing the same name as the project.
+Possible .rel.src candidates for renaming:
+ * ${possible// /
+ * }"
+  fi
+done
+tar_list="${tar_list} ${patch_tar}"
+
+if [ "${opt_patch}" ]
+then
+  opt_patch_tar="additional.patch.tar"
+  info "Adding following to ${opt_patch_tar}:
+ * ${opt_patch// /
+ * }"
+  touch "${opt_patch_tar}"
+  for each_patch in ${opt_patch}
+  do
+    while read each_file
+    do
+      tar -uf "${opt_patch_tar}" ${each_file}
+    done < <(find ${each_patch} -name '.*' -prune -o -type f -print)
+  done
+  gzip "${opt_patch_tar}"
+  extract_list="${extract_list} ${opt_patch_tar}.gz"
+  tar_list="${opt_patch_tar}.gz ${tar_list}"
+fi
+
+cat > ${output} << HEAD_EOF
+#!/bin/bash
+#
+# Run this script to unpack and install ${extract_list}
+#
+
+date=\$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+
+self="\$(basename \${0})"
+
+log_dir="./logs"
+'mkdir' -p \${log_dir}
+log_filename="\${self}-\${date}.log"
+log_output="\${log_dir}/\${log_filename}"
+log_latest="\${self}-latest.log"
+cat > "\${log_output}" << EOF
+_____________________________________________________________________________
+
+log file: \${log_filename}
+generated with ${script_version}
+_____________________________________________________________________________
+
+EOF
+
+('cd' "\${log_dir}" \
+ && 'rm' -f "\${log_latest}" \
+ && 'ln' -s "\${log_filename}" "\${log_latest}"
+)
+
+function info
+{
+  echo -e "${INFO_PREFIX} \${1//
+/
+${INFO_PREFIX} }" | tee -a \${log_output}
+}
+
+function warn
+{
+  echo -e "${WARN_PREFIX} \${1//
+/
+${WARN_PREFIX} }" | tee -a \${log_output}
+}
+
+function error
+{
+  echo -e "${ERROR_PREFIX} \${1//
+/
+${ERROR_PREFIX} }" | tee -a \${log_output}
+  exit 1
+}
+
+function usage
+{
+  echo -e -n "${1:+${ERROR_PREFIX} ${1}\n}" >&2
+  echo " This script \${self} unpacks and installs:" >&2
+  for file in ${extract_list}
+  do
+    echo -e "   * \${file}" >&2
+  done
+  echo " Usage: \${self} [ --help | --install | --unpack | --cleanup ] Install-Modes" >&2
+  exit 1
+}
+
+if [[ "\$#" = "0" ]]
+then
+  usage
+fi
+
+#
+# Check for needed utilities
+#
+for x in uudecode uuencode tar gzip sed;
+do
+  type \$x > /dev/null 2>&1 || error "\$x not found" ;
+done
+
+unpack="false"  
+install="false"
+cleanup="true"
+extra_args=""
+while [[ "\$#" != "0" ]]
+do
+  case "\${1}" in
+  ( --help )
+    usage
+    ;;
+  ( --install )
+    unpack="true"
+    install="true"
+    ;;
+  ( --unpack )
+    unpack="true"
+    cleanup="false"
+    ;;
+  ( --cleanup )
+    ;;
+  ( --* )
+    extra_args="\${extra_args} \${1}"
+    ;;
+  ( * )
+    usage "Unrecognised parameter: \${1}. Aborting."
+    ;;
+  esac
+  shift
+done
+
+case "\$(uname)" in
+( Linux )
+  info "uudecode is Linux flavour"
+  UUDECODE="uudecode -o /dev/stdout"
+;;
+( SunOS | Darwin )
+  info "uudecode is BSD flavour"
+  UUDECODE="uudecode -p"
+;;
+esac
+
+if [[ "\${unpack}" = "true" ]]
+then
+  info "\${self} extracting files:"
+  for file in ${extract_list}
+  do
+    info "   * \${file}"
+  done
+  ( \${UUDECODE} \${0} ) | ( tar -xf - )
+fi
+
+if [[ "\${install}" = "true" ]]
+then
+  source $(basename ${script})\${extra_args}
+fi
+
+#
+# Filter the README file to stderr,
+# discarding lines not prefixed with a ! (pling)
+#
+if [[ -e "README" ]]
+then
+  warn "${COL_RED}Please read the contained README file:${RESET}"
+  sed -n 's/^!\(.*\)$/\1/p' README >&2
+fi
+
+if [[ "\${cleanup}" = "true" ]]
+then
+  info "removing files ${extract_list}"
+  rm ${extract_list}
+fi
+
+exit 0
+HEAD_EOF
+
+( uuencode tmp.tar >> ${output} ) < <( tar -cf - ${tar_list} )
+
+'rm' -f "${opt_patch_tar}.gz"
+
+chmod +x ${output}
